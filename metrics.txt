@@ -1,0 +1,106 @@
+% Performance Analytics Formula Sheet
+\documentclass\[11pt]{article}
+\usepackage{amsmath,amssymb,booktabs,geometry}
+\geometry{letterpaper,margin=1in}
+\title{Performance Analytics Formula Sheet}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% -------------------------------------------------
+\section{Notation}
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbol & Description & Units \\\midrule
+\$ i \$ & Trade (deal) index & -- \\
+\$ b \$ & Bucket index (e.g., RFO size) & -- \\
+\$ \mathcal B\_b \$ & Set of trades belonging to bucket \$b\$ & -- \\
+\$ N\_i \$ & Notional of trade \$i\$ & USD \\
+\$ \mathrm{PNL}\_i \$ & Realised/back--test P\&L of trade \$i\$ & USD \\
+\$ \mathrm{PNL}^{\mathrm{inc}}\_i \$ & \`\`Inception'' P\&L baseline & USD \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% -------------------------------------------------
+\section{Per--Trade Analytics}
+\begin{align}
+\text{Yield}\_i &= \frac{\mathrm{PNL}\_i}{N\_i} \tag{1} \\
+\text{Retention}\_i &= \frac{\mathrm{PNL}\_i}{\mathrm{PNL}^{\mathrm{inc}}\_i} \tag{2}
+\end{align}
+
+\paragraph{Interpretation.} Eq.~~(1) is a return--on--notional measure; multiply by \$100\$ for percent or by \$10,000\$ for basis points.  Eq.~~(2) measures what fraction of the original (inception) P\&L is retained.
+
+% -------------------------------------------------
+\section{Bucket--Level Analytics}
+Aggregate cash figures inside each bucket \$b\$:
+\begin{align}
+\mathrm{PNL}*b &= \sum*{i \in \mathcal B\_b} \mathrm{PNL}*i, &
+N\_b &= \sum*{i \in \mathcal B\_b} N\_i, &
+\mathrm{PNL}^{\mathrm{inc}}*b &= \sum*{i \in \mathcal B\_b} \mathrm{PNL}^{\mathrm{inc}}\_i. \tag{3}
+\end{align}
+Corresponding performance ratios are
+\begin{align}
+\text{Yield}\_b &= \frac{\mathrm{PNL}\_b}{N\_b} \tag{4}\\
+\text{Retention}\_b &= \frac{\mathrm{PNL}\_b}{\mathrm{PNL}^{\mathrm{inc}}\_b}. \tag{5}
+\end{align}
+
+% -------------------------------------------------
+\section{Portfolio--Wide Metrics}
+Remove the bucket subscript and sum over \emph{all} trades:
+\begin{align}
+\mathrm{PNL}*{\mathrm{tot}} &= \sum\_i \mathrm{PNL}*i, &
+N*{\mathrm{tot}} &= \sum\_i N\_i, &
+\mathrm{PNL}^{\mathrm{inc}}*{\mathrm{tot}} &= \sum\_i \mathrm{PNL}^{\mathrm{inc}}*i,\\\[6pt]
+\text{Yield}*{\mathrm{tot}} &= \frac{\mathrm{PNL}*{\mathrm{tot}}}{N*{\mathrm{tot}}}, &
+\text{Retention}*{\mathrm{tot}} &= \frac{\mathrm{PNL}*{\mathrm{tot}}}{\mathrm{PNL}^{\mathrm{inc}}\_{\mathrm{tot}}}. \tag{6}
+\end{align}
+
+% -------------------------------------------------
+\section{Unit Conversion}
+Display any cash metric \$X\$ in millions of dollars via
+\begin{equation}
+X\_{(\$,\mathrm{MM})} = \frac{X}{10^{6}}. \tag{7}
+\end{equation}
+
+% -------------------------------------------------
+\section{FIFO P\&L and Trade Queue Construction}
+\subsection{Trade Representation}
+Each trade \$j\$ is represented by the tuple \$(d\_j, q\_j, P\_j, t\_j)\$ where
+\begin{itemize}
+\item \$d\_j \in {+1,-1}\$ is the direction (\textbf{+1} = buy, \textbf{--1} = sell);
+\item \$q\_j > 0\$ is the absolute quantity (par amount) traded;
+\item \$P\_j\$ is the clean price as a percentage of par (e.g., \$101.25\$);
+\item \$t\_j\$ is the execution timestamp.
+\end{itemize}
+
+\subsection{FIFO Queue \texorpdfstring{\$\mathcal Q\$}{Q}}
+We maintain a queue \$\mathcal Q\$ containing open \emph{long} positions only.  Each element is a triple
+$(q_k, P_k, t_k) \in \mathcal Q\,; \qquad q_k>0.$
+New trades are processed chronologically:
+\begin{enumerate}
+\item \textbf{Buy (\$d\_j=+1\$):} append \$(q\_j,P\_j,t\_j)\$ to the \emph{tail} of \$\mathcal Q\$.
+\item \textbf{Sell (\$d\_j=-1\$):} realise P\&L against the \emph{head} of \$\mathcal Q\$ first (oldest inventory) until the sell quantity is exhausted.  For each matched slice \$m\$ with quantity \$q\_m\$:
+\begin{equation}
+\mathrm{PNL}^{\mathrm{FIFO}}*m = q\_m,(P^{\mathrm{sell}}*{j} - P^{\mathrm{buy}}*{k}), \tag{8}
+\end{equation}
+where \$(q\_m,P^{\mathrm{buy}}*{k})\$ comes from the head item in \$\mathcal Q\$.  Decrease its remaining size; remove it when depleted.
+\end{enumerate}
+After processing all trades up to time \$T\$:
+\begin{align}
+\text{Realised FIFO P\&L}(T) &= \sum\_{m,:,t\_m \le T} \mathrm{PNL}^{\mathrm{FIFO}}*m, \tag{9}\\
+\text{Unrealised P\&L}(T) &= \sum*{(q\_k,P\_k) \in \mathcal Q} q\_k,(P^{\mathrm{mkt}}\_T - P\_k), \tag{10}
+\end{align}
+so that the total mark-to-market P\&L is the sum of (9) and (10).
+
+\paragraph{Edge cases.}  \textit{Shorting.}  If sells exceed current inventory, one may either allow negative queue sizes (implicit short) or open a separate \`\`short'' queue; adopt the convention that fits your risk system.  \textit{Corporate actions.}  Accrued interest and coupon payments can be incorporated by adjusting prices \$P\_j\$ or by adding carry terms to Eq.\~(8).
+
+% -------------------------------------------------
+\section{Link to Performance Metrics}
+The realised FIFO P\&L in Eq.\~(9) feeds directly into the cash numerators \$\mathrm{PNL}\_i\$ and therefore into Yield (Eq.\~1) and Retention (Eq.\~2).  Bucket--level and portfolio formulas (Eqs.\~3--6) remain unchanged; simply substitute FIFO--realised P\&L wherever raw P\&L appears.
+
+\end{document}
+
