@@ -1,0 +1,98 @@
+\documentclass{article}
+\usepackage{amsmath, amssymb}
+\usepackage{geometry}
+\geometry{margin=1in}
+\title{PnL and Market-Making Cost Model}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{1. PnL Attribution (Rust-Inspired Logic)}
+
+\begin{align*}
+\text{open\_position\_pnl} &= \text{open\_position}_{t-1} \cdot (P_t - P_{t-1}) \\
+\text{total\_pnl\_without\_fee} &= \text{open\_position}_t \cdot (P_t - C_t) \\
+\text{previous\_pnl\_without\_fee} &= \text{open\_position}_{t-1} \cdot (P_{t-1} - C_{t-1}) \\
+\text{period\_pnl\_without\_fee} &= \text{total\_pnl\_without\_fee} - \text{previous\_pnl\_without\_fee} \\
+\text{period\_trading\_pnl} &= \text{period\_pnl\_without\_fee} - \text{open\_position\_pnl} \\
+\text{period\_fees} &= \text{fees}_t - \text{fees}_{t-1} \\
+\text{period\_pnl\_with\_fee} &= \text{period\_pnl\_without\_fee} - \text{period\_fees} \\
+\text{total\_pnl\_with\_fee} &= \text{total\_pnl\_without\_fee} - \text{fees}_t
+\end{align*}
+
+\section*{2. Cost of Capital}
+
+\begin{align*}
+x_t(X, s) &= X(s) - t \cdot \Delta X(s) \\
+Y(X, s) &= \sum_{t=0}^{T(s)} x_t(X, s) \cdot r
+\end{align*}
+
+\section*{3. Trading Impact Cost (Almgren-Chriss)}
+
+\textbf{General Form:}
+\[
+I(x) = \sum_{k=1}^{N} \left[ \tau x_k \cdot g\left(\frac{n_k}{\tau}\right) + n_k \cdot h\left(\frac{n_k}{\tau}\right) \right]
+\]
+
+\textbf{Simplified with constant flow:}
+\[
+I(X, s) = \sum_{t=1}^{T(s)} \left[ x_t(X, s) \cdot g(\Delta X(s)) + \Delta X(s) \cdot h(s) \right]
+\]
+
+\section*{4. Impact Functions}
+
+\begin{align*}
+g(\cdot) &= \text{permanent impact rate (e.g., 0.01)} \\
+h(s) &= \text{spread} \cdot s \\
+h(s) &= \text{spread} \cdot s + \Delta \text{fee} \quad \text{(if taker fees included)}
+\end{align*}
+
+\section*{5. PnL Variance}
+
+\begin{align*}
+V(X, s) &= \sigma^2 \sum_{t=1}^{T(s)} x_t(X, s)
+\end{align*}
+
+\section*{6. Full Cost Model}
+
+\[
+C(X, s) = Y(X, s) + I(X, s) + \lambda V(X, s)
+\]
+
+\section*{7. Continuous-Time Liquidation Dynamics}
+
+\begin{align*}
+dX_t &= v_t S_t dt - g\left(\frac{v_t}{V_t}\right) v_t dt \\
+dS_t &= \sigma dW_t + k v_t dt \\
+dq_t &= v_t dt
+\end{align*}
+
+\section*{8. Optimal Liquidation Problem}
+
+\[
+\max_{(v_t)} \mathbb{E}[u(X_T)] \quad \text{subject to} \quad \int_0^T v_s ds = q_0
+\]
+
+\textbf{Exponential utility:}
+\begin{align*}
+u(x) &= -e^{-\gamma x} \\
+\mathbb{E}[u(X_T)] &= -e^{-\gamma \mathbb{E}[X_T] + \frac{\gamma^2}{2} \text{Var}(X_T)}
+\end{align*}
+
+\section*{9. Market Making Cost of Flow}
+
+\begin{align*}
+dX_t &= \Delta \left( (S_t + \delta^a_t) dN^a_t - (S_t - \delta^b_t) dN^b_t \right) \\
+dq_t &= \Delta \left( dN^b_t - dN^a_t \right)
+\end{align*}
+
+\textbf{Where:}
+\begin{itemize}
+    \item \( N^a_t, N^b_t \): Poisson processes for ask/bid fills
+    \item \( \delta^a_t, \delta^b_t \): quote skews
+\end{itemize}
+
+\end{document}
+
