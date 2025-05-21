@@ -1,0 +1,1255 @@
+# ETF Create/Redeem RFQ Simulation
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import cvxpy as cp
+from scipy.optimize import minimize
+import seaborn as sns
+from tqdm.notebook import tqdm
+from IPython.display import display, Markdown, Math
+import networkx as nx
+from itertools import combinations
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# Configure plotting
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.rcParams['figure.figsize'] = [10, 6]
+plt.rcParams['figure.dpi'] = 100
+plt.rcParams['font.size'] = 12
+
+# Display formulas in nice LaTeX format
+def display_formula(formula, name=None):
+    if name:
+        display(Markdown(f"**{name}:**"))
+    display(Math(formula))
+
+# 1. Define Simulation Parameters
+display(Markdown("# ETF Create/Redeem RFQ Framework Simulation"))
+display(Markdown("## 1. Simulation Parameters"))
+
+# Number of bonds in our universe
+n_bonds = 20
+
+# Define ETF baskets (simplified for toy example)
+n_etfs = 3
+
+# Time parameters
+simulation_days = 5
+timesteps_per_day = 10
+dt = 1.0 / timesteps_per_day
+total_timesteps = simulation_days * timesteps_per_day
+
+# Generate some random correlation matrix for the bonds
+def generate_corr_matrix(n, factor_structure=True):
+    if factor_structure:
+        # Generate a factor-based correlation
+        n_factors = 3
+        factor_loadings = np.random.normal(0, 1, size=(n, n_factors))
+        factor_loadings = factor_loadings / np.sqrt(np.sum(factor_loadings**2, axis=1, keepdims=True))
+        corr = factor_loadings @ factor_loadings.T
+        # Add some noise and ensure diagonal is 1
+        noise = 0.1 * np.random.normal(0, 1, size=(n, n))
+        noise = (noise + noise.T) / 2  # Make it symmetric
+        corr = corr + noise
+        np.fill_diagonal(corr, 1.0)
+        # Ensure it's positive definite by adding small value to diagonal if needed
+        min_eig = np.min(np.linalg.eigvals(corr))
+        if min_eig < 0:
+            corr += (-min_eig + 1e-6) * np.eye(n)
+        # Rescale to ensure diagonal is 1
+        d = np.sqrt(np.diag(corr))
+        corr = corr / np.outer(d, d)
+    else:
+        # Generate random correlation matrix
+        A = np.random.normal(0, 1, size=(n, n))
+        corr = A @ A.T
+        # Normalize to get correlation matrix
+        d = np.sqrt(np.diag(corr))
+        corr = corr / np.outer(d, d)
+    
+    return corr
+
+# Generate bond correlation matrix
+corr_matrix = generate_corr_matrix(n_bonds)
+
+# Volatility of bonds (annualized, in basis points)
+bond_vols = np.random.uniform(50, 150, n_bonds)
+
+# Convert to daily covariance matrix (DV01-weighted)
+daily_vol_factor = 1/np.sqrt(252)  # Convert annual to daily
+bond_daily_vols = bond_vols * daily_vol_factor
+cov_matrix = np.outer(bond_daily_vols, bond_daily_vols) * corr_matrix
+
+# DV01 values for the bonds (normalize to average of 100k)
+bond_dv01 = np.random.uniform(50000, 150000, n_bonds)
+
+# Trading cost matrix (simplified) - higher for less liquid bonds
+liquidity_factor = np.random.uniform(1, 5, n_bonds)  # Higher means less liquid
+gamma_diag = 1e-6 * np.square(liquidity_factor)  # Cost per (DV01/day)^2
+gamma_matrix = np.diag(gamma_diag)
+
+# Create some bond characteristics for visualization
+bond_data = pd.DataFrame({
+    'Bond': [f'Bond_{i+1}' for i in range(n_bonds)],
+    'DV01': bond_dv01,
+    'Volatility_bps': bond_vols,
+    'Liquidity': 1/liquidity_factor,
+    'Sector': np.random.choice(['Financial', 'Industrial', 'Technology', 'Energy', 'Healthcare'], n_bonds),
+    'Rating': np.random.choice(['AAA', 'AA', 'A', 'BBB', 'BB'], n_bonds, p=[0.05, 0.15, 0.3, 0.4, 0.1]),
+    'Maturity': np.random.uniform(1, 10, n_bonds).round(1)
+})
+
+# Display bond data
+display(bond_data.head())
+
+# Visualize correlation matrix
+plt.figure(figsize=(10, 8))
+sns.heatmap(corr_matrix, cmap='coolwarm', annot=False, vmin=-1, vmax=1)
+plt.title('Bond Correlation Matrix')
+plt.tight_layout()
+plt.show()
+
+# 2. Generate ETF Baskets
+display(Markdown("## 2. ETF Basket Composition"))
+
+# For each ETF, create a composition vector (weights sum to 1)
+np.random.seed(42)  # Reset seed for reproducibility
+
+# Create baskets with different characteristics
+basket_weights = []
+
+# Function to create a basket with sector tilts
+def create_sector_tilted_basket(bond_data, target_sector, tilt_factor=1.5):
+    sector_indicator = (bond_data['Sector'] == target_sector).astype(float)
+    weights = sector_indicator * tilt_factor + 1.0
+    # Add some random noise
+    weights += np.random.uniform(-0.5, 0.5, len(weights))
+    # Ensure non-negative
+    weights = np.maximum(weights, 0.1)
+    # Normalize to sum to 1
+    weights = weights / np.sum(weights)
+    return weights
+
+# Function to create a rating-tilted basket
+def create_rating_tilted_basket(bond_data, target_ratings):
+    rating_indicator = bond_data['Rating'].isin(target_ratings).astype(float)
+    weights = rating_indicator * 1.5 + 0.5
+    # Add some random noise
+    weights += np.random.uniform(-0.3, 0.3, len(weights))
+    # Ensure non-negative
+    weights = np.maximum(weights, 0.1)
+    # Normalize to sum to 1
+    weights = weights / np.sum(weights)
+    return weights
+
+# Create different baskets
+tech_basket = create_sector_tilted_basket(bond_data, 'Technology', 2.0)
+high_quality_basket = create_rating_tilted_basket(bond_data, ['AAA', 'AA', 'A'])
+balanced_basket = np.ones(n_bonds) / n_bonds
+
+basket_weights = np.vstack([tech_basket, high_quality_basket, balanced_basket])
+
+# Create ETF data
+etf_data = pd.DataFrame({
+    'ETF': [f'ETF_{i+1}' for i in range(n_etfs)],
+    'Type': ['Tech-Focused', 'High-Quality', 'Balanced'],
+    'AUM ($M)': [100, 200, 500],
+    'Risk (bp)': [np.sqrt(w @ cov_matrix @ w) * 100 for w in basket_weights]
+})
+
+# Display ETF data
+display(etf_data)
+
+# Visualize the basket weights
+plt.figure(figsize=(12, 6))
+x = np.arange(n_bonds)
+width = 0.25
+
+for i in range(n_etfs):
+    plt.bar(x + i*width - width, basket_weights[i], width, label=etf_data['ETF'][i])
+    
+plt.xlabel('Bond Index')
+plt.ylabel('Weight in Basket')
+plt.title('ETF Basket Compositions')
+plt.legend()
+plt.xticks(x, [f'B{i+1}' for i in range(n_bonds)])
+plt.tight_layout()
+plt.show()
+
+# Compute basket similarities using different metrics
+basket_similarities = np.zeros((n_etfs, n_etfs))
+
+for i in range(n_etfs):
+    for j in range(n_etfs):
+        # Correlation-based similarity
+        corr_ij = (basket_weights[i] @ cov_matrix @ basket_weights[j]) / np.sqrt((basket_weights[i] @ cov_matrix @ basket_weights[i]) * (basket_weights[j] @ cov_matrix @ basket_weights[j]))
+        
+        # Composition overlap
+        comp_overlap = np.sum(np.minimum(basket_weights[i], basket_weights[j]))
+        
+        # Average the two measures
+        basket_similarities[i, j] = (0.5 * (corr_ij + 1) + 0.5 * comp_overlap) / 2
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(basket_similarities, annot=True, cmap='viridis', 
+            xticklabels=etf_data['ETF'], yticklabels=etf_data['ETF'])
+plt.title('ETF Basket Similarities')
+plt.tight_layout()
+plt.show()
+
+# 3. RFQ Fill Probability Model
+display(Markdown("## 3. RFQ Fill Probability Model"))
+
+# Display the fill probability formula
+display_formula(r"\pi_i^{\text{RFQ}}(t, s_i, a_i, d_i, m_t) = \pi_{\text{base},i}(t) \cdot f_{\text{size}}(s_i, i) \cdot f_{\text{aggr}}(a_i, i) \cdot f_{\text{dir}}(d_i, i, t) \cdot f_{\text{market}}(m_t)", 
+               "Fill Probability Formula")
+
+# Define RFQ fill probability model parameters
+baseline_fill_prob = np.random.uniform(0.5, 0.9, n_bonds)
+size_sensitivity = np.random.uniform(0.5, 2.0, n_bonds) / liquidity_factor  # Less liquid bonds more sensitive to size
+aggression_sensitivity = np.random.uniform(0.01, 0.05, n_bonds)
+direction_sensitivity = np.random.uniform(0.1, 0.3, n_bonds)
+market_sensitivity = 0.2
+
+# Average daily volumes for each bond (in DV01 terms)
+bond_adv = bond_dv01 * np.random.uniform(10, 30, n_bonds) / liquidity_factor
+
+# Current market condition (VIX spread-like measure)
+market_condition = 0.0  # 0 = normal, positive = stressed
+
+# Market position imbalance (-1 to 1, negative means excess demand, positive excess supply)
+market_imbalance = np.random.uniform(-0.5, 0.5, n_bonds)
+
+# Function to calculate fill probability
+def calc_fill_probability(bond_idx, size, aggression, direction, market_cond):
+    """
+    Calculate the probability of filling an RFQ
+    
+    Parameters:
+    - bond_idx: index of the bond
+    - size: size of the RFQ in DV01 terms
+    - aggression: price aggression in basis points (+ve means aggressive)
+    - direction: +1 for buy, -1 for sell
+    - market_cond: market condition indicator
+    
+    Returns:
+    - fill probability between 0 and 1
+    """
+    # Base probability
+    base_prob = baseline_fill_prob[bond_idx]
+    
+    # Size adjustment
+    size_adj = np.exp(-size_sensitivity[bond_idx] * size / bond_adv[bond_idx])
+    
+    # Price aggression adjustment
+    aggr_adj = np.exp(aggression_sensitivity[bond_idx] * aggression)
+    
+    # Direction adjustment
+    dir_adj = 1.0 + direction_sensitivity[bond_idx] * (market_imbalance[bond_idx] * direction)
+    
+    # Market condition adjustment
+    market_adj = 1.0 - market_sensitivity * market_cond
+    
+    # Calculate final probability
+    prob = base_prob * size_adj * aggr_adj * dir_adj * market_adj
+    
+    # Ensure probability is between 0 and 1
+    return np.clip(prob, 0.0, 1.0)
+
+# Visualize fill probability curves for a few bonds
+selected_bonds = [0, 5, 10, 15]  # Sample a few bonds
+size_range = np.linspace(0, 3 * bond_adv[0], 100)  # Up to 3x ADV
+aggr_range = np.linspace(-3, 3, 100)  # -3 to +3 bps
+
+# Plot fill probability vs size
+plt.figure(figsize=(16, 6))
+
+plt.subplot(1, 2, 1)
+for idx in selected_bonds:
+    probs = [calc_fill_probability(idx, s, 0, 1, 0) for s in size_range]
+    plt.plot(size_range / bond_adv[idx], probs, 
+             label=f'Bond {idx+1} (Liq={1/liquidity_factor[idx]:.2f})')
+
+plt.xlabel('Trade Size (× ADV)')
+plt.ylabel('Fill Probability')
+plt.title('RFQ Fill Probability vs. Size')
+plt.legend()
+plt.grid(True)
+
+# Plot fill probability vs aggression
+plt.subplot(1, 2, 2)
+for idx in selected_bonds:
+    probs = [calc_fill_probability(idx, bond_adv[idx] * 0.5, a, 1, 0) for a in aggr_range]
+    plt.plot(aggr_range, probs, 
+             label=f'Bond {idx+1} (Sens={aggression_sensitivity[idx]:.3f})')
+
+plt.xlabel('Price Aggression (bp)')
+plt.ylabel('Fill Probability')
+plt.title('RFQ Fill Probability vs. Price Aggression')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# 4. Arbitrage Value Calculation
+display(Markdown("## 4. Arbitrage Value Calculation"))
+
+# Display the arbitrage value formula
+display_formula(r"\text{ArbitrageValue}_j(t) = (\text{ETF}_{\text{bid/ask}}(t) - \text{FairValue}_j(t)) - \text{Fees}_j - \text{FrictionCost}_j(t) - \text{RiskAdjustment}_j(t)",
+               "Arbitrage Value Formula")
+
+# Define ETF prices and fair values
+# Start with fair values based on bond prices
+bond_prices = 100 + np.random.normal(0, 1, n_bonds)  # Bond prices around par
+fair_values = [np.sum(basket_weights[j] * bond_prices) for j in range(n_etfs)]
+
+# Add some premium/discount for the ETFs
+etf_premium = np.random.uniform(-0.2, 0.3, n_etfs)  # In percent
+etf_bid_ask = 0.05  # ETF bid-ask spread in percent
+
+# ETF prices
+etf_mid = [fv * (1 + prem/100) for fv, prem in zip(fair_values, etf_premium)]
+etf_bid = [mid * (1 - etf_bid_ask/200) for mid in etf_mid]
+etf_ask = [mid * (1 + etf_bid_ask/200) for mid in etf_mid]
+
+# Creation/redemption fees
+creation_fees = [0.1, 0.15, 0.2]  # In percent of NAV
+redemption_fees = [0.12, 0.18, 0.22]  # In percent of NAV
+
+# Market frictions - bid/ask impact, NAV timing, settlement
+bid_ask_impact = [0.05, 0.08, 0.07]  # Percent
+nav_timing = [0.02, 0.03, 0.02]  # Percent
+settlement_cost = [0.01, 0.015, 0.01]  # Percent
+
+# Risk adjustment
+risk_aversion = 0.2
+basket_sizes = np.array([100000, 150000, 200000])  # DV01 size
+basket_vols = np.array([np.sqrt(b_w @ cov_matrix @ b_w) * 100 for b_w in basket_weights])
+time_horizon = 1/252  # 1 day in years
+
+risk_adjustments = risk_aversion * np.sqrt(basket_sizes**2 * basket_vols**2 * time_horizon) / basket_sizes * 100  # In percent
+
+# Calculate arbitrage values for creation (buy bonds, sell ETF)
+create_arb_values = [(etf_b - fv)/fv*100 - fee - (ba + nt + sc) - ra 
+                    for etf_b, fv, fee, ba, nt, sc, ra in 
+                    zip(etf_bid, fair_values, creation_fees, bid_ask_impact, nav_timing, settlement_cost, risk_adjustments)]
+
+# Calculate arbitrage values for redemption (buy ETF, sell bonds)
+redeem_arb_values = [(fv - etf_a)/fv*100 - fee - (ba + nt + sc) - ra
+                     for etf_a, fv, fee, ba, nt, sc, ra in
+                     zip(etf_ask, fair_values, redemption_fees, bid_ask_impact, nav_timing, settlement_cost, risk_adjustments)]
+
+# Display arbitrage values
+arb_data = pd.DataFrame({
+    'ETF': etf_data['ETF'],
+    'Fair Value': fair_values,
+    'ETF Mid': etf_mid,
+    'ETF Premium/Discount (%)': etf_premium,
+    'Creation Arbitrage (bp)': [v*100 for v in create_arb_values],
+    'Redemption Arbitrage (bp)': [v*100 for v in redeem_arb_values]
+})
+
+display(arb_data)
+
+# Visualize arbitrage value components for one ETF
+etf_idx = 0  # Use the first ETF for visualization
+
+# Creation stack
+creation_stack = [
+    etf_premium[etf_idx],                 # Premium/discount
+    -creation_fees[etf_idx],              # Creation fee
+    -bid_ask_impact[etf_idx],             # Bid/ask impact
+    -nav_timing[etf_idx],                 # NAV timing
+    -settlement_cost[etf_idx],            # Settlement
+    -risk_adjustments[etf_idx],           # Risk adjustment
+    create_arb_values[etf_idx]            # Net arb value
+]
+
+creation_labels = [
+    'Premium/Discount',
+    'Creation Fee',
+    'Bid/Ask Impact',
+    'NAV Timing',
+    'Settlement',
+    'Risk Adjustment',
+    'Net Arb Value'
+]
+
+# Redemption stack
+redemption_stack = [
+    -etf_premium[etf_idx],                # Premium/discount (reversed for redemption)
+    -redemption_fees[etf_idx],            # Redemption fee
+    -bid_ask_impact[etf_idx],             # Bid/ask impact
+    -nav_timing[etf_idx],                 # NAV timing
+    -settlement_cost[etf_idx],            # Settlement
+    -risk_adjustments[etf_idx],           # Risk adjustment
+    redeem_arb_values[etf_idx]            # Net arb value
+]
+
+redemption_labels = [
+    'Premium/Discount',
+    'Redemption Fee',
+    'Bid/Ask Impact',
+    'NAV Timing',
+    'Settlement',
+    'Risk Adjustment',
+    'Net Arb Value'
+]
+
+plt.figure(figsize=(14, 6))
+
+# Creation waterfall
+plt.subplot(1, 2, 1)
+waterfall_values = creation_stack[:-1] + [0]  # Exclude net value for cumulative sum
+cumulative = np.cumsum(waterfall_values)
+cumulative = np.insert(cumulative, 0, 0)  # Start from 0
+
+for i in range(len(waterfall_values)):
+    plt.bar(i, waterfall_values[i], bottom=cumulative[i], 
+            color='green' if waterfall_values[i] > 0 else 'red')
+
+plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+plt.axhline(y=creation_stack[-1], color='blue', linestyle='--', alpha=0.8, label='Net Value')
+plt.xticks(range(len(creation_labels[:-1])), creation_labels[:-1], rotation=45, ha='right')
+plt.ylabel('Value (% of NAV)')
+plt.title(f'Creation Arbitrage Stack for {etf_data["ETF"][etf_idx]}')
+plt.legend()
+
+# Redemption waterfall
+plt.subplot(1, 2, 2)
+waterfall_values = redemption_stack[:-1] + [0]  # Exclude net value
+cumulative = np.cumsum(waterfall_values)
+cumulative = np.insert(cumulative, 0, 0)  # Start from 0
+
+for i in range(len(waterfall_values)):
+    plt.bar(i, waterfall_values[i], bottom=cumulative[i], 
+            color='green' if waterfall_values[i] > 0 else 'red')
+
+plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+plt.axhline(y=redemption_stack[-1], color='blue', linestyle='--', alpha=0.8, label='Net Value')
+plt.xticks(range(len(redemption_labels[:-1])), redemption_labels[:-1], rotation=45, ha='right')
+plt.ylabel('Value (% of NAV)')
+plt.title(f'Redemption Arbitrage Stack for {etf_data["ETF"][etf_idx]}')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+# 5. Modified Geodesic Flow
+display(Markdown("## 5. Modified Geodesic Flow"))
+
+# Display the modified geodesic flow formula
+display_formula(r"\dot{\mathbf{p}}(t) = -\mathbf{M}_f^{-1} \mathbf{K}_f \mathbf{p}(t) + \mathbf{M}_f^{-1} \lambda_{\text{basket}}(t) \sum_{j} v_j(t) \mathbf{u}_j \mathbf{u}_j^T \mathbf{p}(t)", 
+               "Modified Geodesic Flow")
+
+# Initial portfolio position (in DV01 terms)
+initial_position = np.random.normal(0, 100000, n_bonds)
+
+# Compute matrices for geodesic flow
+# For simplicity, we'll use diagonal matrices for M_f and K_f
+# B matrix is identity for this example
+B = np.eye(n_bonds)
+M_f = B.T @ np.diag(1/(liquidity_factor**2)) @ B  # Inverse of trading cost matrix
+K_f = B.T @ cov_matrix @ B  # Risk matrix
+
+# For numerical stability in matrix inversion
+M_f_inv = np.linalg.inv(M_f + 1e-6 * np.eye(n_bonds))
+
+# Normalize basket directions
+basket_directions = []
+for j in range(n_etfs):
+    u_j = basket_weights[j] / np.linalg.norm(basket_weights[j])
+    basket_directions.append(u_j)
+
+# Function to calculate basket-aligned flow 
+def basket_geodesic_flow(position, basket_idx, lambda_basket=0.1):
+    u_j = basket_directions[basket_idx]
+    
+    # Standard geodesic flow term
+    standard_flow = -M_f_inv @ K_f @ position
+    
+    # Basket alignment term
+    alignment_term = lambda_basket * M_f_inv @ (u_j.reshape(-1, 1) @ u_j.reshape(1, -1)) @ position
+    
+    # Combined flow
+    flow = standard_flow + alignment_term
+    
+    return flow
+
+# Simulate geodesic flow for a single basket over time
+time_points = np.arange(0, 1.0, dt)
+selected_basket = 0  # Use first basket for illustration
+
+# Initialize trajectory arrays
+positions = [initial_position.copy()]
+flow_components = []
+
+# Increasing lambda over time to show stronger basket alignment
+lambda_values = np.linspace(0.1, 2.0, len(time_points))
+
+for t_idx, t in enumerate(time_points):
+    current_pos = positions[-1]
+    
+    # Calculate standard and basket flow components
+    standard_flow = -M_f_inv @ K_f @ current_pos
+    u_j = basket_directions[selected_basket]
+    basket_flow = lambda_values[t_idx] * M_f_inv @ (u_j.reshape(-1, 1) @ u_j.reshape(1, -1)) @ current_pos
+    
+    # Combined flow
+    flow = standard_flow + basket_flow
+    
+    # Store components for visualization
+    flow_components.append((standard_flow, basket_flow))
+    
+    # Update position using Euler integration
+    new_pos = current_pos + flow * dt
+    positions.append(new_pos)
+
+positions = np.array(positions)
+
+# Calculate basket completion over time
+u_j = basket_directions[selected_basket]
+w_j = basket_weights[selected_basket]
+
+# Project position onto basket direction
+proj_values = [np.dot(pos, u_j) / np.dot(w_j, u_j) for pos in positions]
+integer_baskets = [np.floor(pv) for pv in proj_values]
+completion_pct = [1.0 - np.linalg.norm(pos - int_b * w_j) / np.linalg.norm(int_b * w_j) 
+                 if int_b > 0 else 0.0 
+                 for pos, int_b in zip(positions, integer_baskets)]
+
+# Visualize the projection and completion
+plt.figure(figsize=(15, 6))
+
+plt.subplot(1, 2, 1)
+plt.plot(np.arange(len(positions)), proj_values, 'b-', label='Projection Value')
+plt.plot(np.arange(len(positions)), integer_baskets, 'r--', label='Integer Baskets')
+plt.xlabel('Time Step')
+plt.ylabel('Basket Projection')
+plt.title('Basket Projection Value Over Time')
+plt.legend()
+plt.grid(True)
+
+plt.subplot(1, 2, 2)
+plt.plot(np.arange(len(positions)), completion_pct, 'g-')
+plt.xlabel('Time Step')
+plt.ylabel('Completion Percentage')
+plt.title('Basket Completion Percentage')
+plt.axhline(y=0.9, color='r', linestyle='--', label='90% Threshold')
+plt.grid(True)
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+# Visualize flow in principal component space
+# Perform PCA on positions
+from sklearn.decomposition import PCA
+
+pca = PCA(n_components=2)
+pos_pca = pca.fit_transform(positions)
+
+# Also transform basket weights into the same space
+basket_pca = pca.transform(np.array([w_j * n for n in range(int(np.max(integer_baskets))+2)]))
+
+plt.figure(figsize=(10, 8))
+plt.scatter(pos_pca[:, 0], pos_pca[:, 1], c=np.arange(len(pos_pca)), cmap='viridis', 
+            alpha=0.6, s=30)
+plt.plot(pos_pca[:, 0], pos_pca[:, 1], 'k-', alpha=0.3)
+plt.scatter(basket_pca[:, 0], basket_pca[:, 1], c='red', marker='x', s=100, label='Integer Baskets')
+plt.colorbar(label='Time Step')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.title('Portfolio Trajectory in PCA Space')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# 6. Integer Optimization for Basket Quantities
+display(Markdown("## 6. Integer Optimization for Basket Quantities"))
+
+# Display the MIQP objective function
+display_formula(r"\min_{\mathbf{z}, \mathbf{p}_{\text{residual}}} (\mathbf{p}_{\text{final}} - \mathbf{p}(t))^T \boldsymbol{\Pi}(t)^{-1} \boldsymbol{\Gamma} \boldsymbol{\Pi}(t)^{-1} (\mathbf{p}_{\text{final}} - \mathbf{p}(t)) + \lambda_{\text{risk}} \mathbf{p}_{\text{final}}^T \boldsymbol{\Sigma} \mathbf{p}_{\text{final}} - \sum_{j=1}^K z_j \cdot \text{ArbitrageValue}_j(t)", 
+               "Integer Optimization Objective")
+
+# Choose a position close to completing baskets
+close_position = positions[-1]  # Use the last position from geodesic flow
+
+# For a toy example, we'll formulate a simplified integer program
+# and solve it using CVXPY's mixed-integer capabilities
+
+# Define variables
+z = cp.Variable(n_etfs, integer=True)
+p_residual = cp.Variable(n_bonds)
+
+# Form the basket matrix - each column is a basket weight vector
+W = np.vstack([basket_weights[j] for j in range(n_etfs)]).T
+
+# Simplified cost matrix (diagonal approximation)
+Pi_inv_Gamma_Pi_inv = np.diag(gamma_diag)  # Simplified cost matrix
+
+# Define parameters
+lambda_risk = 0.1
+arb_values = np.array([max(create_arb_values[j], redeem_arb_values[j]) for j in range(n_etfs)])
+
+# CVXPY objective 
+p_final = W @ z + p_residual  # Final portfolio
+execution_cost = cp.quad_form(p_final - close_position, Pi_inv_Gamma_Pi_inv)
+risk_cost = cp.quad_form(p_final, cov_matrix) * lambda_risk
+arb_value = z @ arb_values
+
+objective = cp.Minimize(execution_cost + risk_cost - arb_value)
+
+# Constraints
+constraints = [
+    z >= 0,                           # Non-negative baskets
+    cp.sum(z) <= 5,                   # Maximum 5 total baskets
+    cp.quad_form(p_residual, cov_matrix) <= 0.1 * cp.quad_form(close_position, cov_matrix)  # Limit residual risk
+]
+
+# Solve the problem
+prob = cp.Problem(objective, constraints)
+try:
+    prob.solve(solver=cp.ECOS_BB)  # Mixed-integer solver
+    
+    if prob.status == 'optimal':
+        # Extract solutions
+        z_opt = z.value
+        p_residual_opt = p_residual.value
+        p_final_opt = W @ z_opt + p_residual_opt
+        
+        # Round to integers for clarity
+        z_integers = np.round(z_opt).astype(int)
+        
+        display(Markdown(f"### Optimization Results"))
+        display(Markdown(f"Status: {prob.status}"))
+        
+        # Create results table
+        results_df = pd.DataFrame({
+            'ETF': etf_data['ETF'],
+            'Arbitrage Value (bp)': [v*100 for v in arb_values],
+            'Basket Quantity': z_integers,
+            'Total Value (bp)': z_integers * [v*100 for v in arb_values]
+        })
+        display(results_df)
+        
+        # Visualize composition of final portfolio
+        etf_components = W @ z_integers
+        
+        plt.figure(figsize=(12, 6))
+        
+        plt.subplot(1, 2, 1)
+        plt.bar(range(n_bonds), close_position, alpha=0.5, label='Initial Position')
+        plt.bar(range(n_bonds), p_final_opt, alpha=0.5, label='Optimized Position')
+        plt.xlabel('Bond Index')
+        plt.ylabel('Position (DV01)')
+        plt.title('Portfolio Position Before and After Optimization')
+        plt.legend()
+        plt.xticks(range(n_bonds), [f'B{i+1}' for i in range(n_bonds)], rotation=90)
+        
+        plt.subplot(1, 2, 2)
+        plt.bar(range(n_bonds), etf_components, alpha=0.7, label='ETF Components', color='blue')
+        plt.bar(range(n_bonds), p_residual_opt, bottom=etf_components, alpha=0.7, label='Residual', color='red')
+        plt.xlabel('Bond Index')
+        plt.ylabel('Position (DV01)')
+        plt.title('Decomposition of Optimized Position')
+        plt.legend()
+        plt.xticks(range(n_bonds), [f'B{i+1}' for i in range(n_bonds)], rotation=90)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Calculate residual risk vs ETF risk
+        etf_risk = np.sqrt(etf_components.T @ cov_matrix @ etf_components)
+        residual_risk = np.sqrt(p_residual_opt.T @ cov_matrix @ p_residual_opt)
+        total_risk = np.sqrt(p_final_opt.T @ cov_matrix @ p_final_opt)
+        
+        display(Markdown(f"ETF Component Risk: {etf_risk:.2f} bp/day"))
+        display(Markdown(f"Residual Risk: {residual_risk:.2f} bp/day"))
+        display(Markdown(f"Total Risk: {total_risk:.2f} bp/day"))
+        display(Markdown(f"Residual Risk %: {(residual_risk/total_risk*100):.2f}%"))
+        
+    else:
+        display(Markdown(f"Problem could not be solved: {prob.status}"))
+except Exception as e:
+    display(Markdown(f"Error solving the problem: {str(e)}"))
+    # If solver fails, generate a simple solution for demonstration
+    z_integers = np.array([1, 1, 0])
+    p_residual_opt = close_position - W @ z_integers
+    p_final_opt = W @ z_integers + p_residual_opt
+    
+    display(Markdown(f"### Fallback Results (Solver Error)"))
+    
+    # Create results table
+    results_df = pd.DataFrame({
+        'ETF': etf_data['ETF'],
+        'Arbitrage Value (bp)': [v*100 for v in arb_values],
+        'Basket Quantity': z_integers,
+        'Total Value (bp)': z_integers * [v*100 for v in arb_values]
+    })
+    display(results_df)
+    
+    # Calculate risks
+    etf_components = W @ z_integers
+    etf_risk = np.sqrt(etf_components.T @ cov_matrix @ etf_components)
+    residual_risk = np.sqrt(p_residual_opt.T @ cov_matrix @ p_residual_opt)
+    total_risk = np.sqrt(p_final_opt.T @ cov_matrix @ p_final_opt)
+    
+    display(Markdown(f"ETF Component Risk: {etf_risk:.2f} bp/day"))
+    display(Markdown(f"Residual Risk: {residual_risk:.2f} bp/day"))
+    display(Markdown(f"Total Risk: {total_risk:.2f} bp/day"))
+    display(Markdown(f"Residual Risk %: {(residual_risk/total_risk*100):.2f}%"))
+
+# 7. RFQ Execution Strategy
+display(Markdown("## 7. RFQ Execution Strategy"))
+
+# Display the optimal RFQ formula
+display_formula(r"(s_i^*, a_i^*) = \underset{s_i, a_i}{\arg\max} \quad \pi_i^{\text{RFQ}}(t, s_i, a_i, d_i, m_t) \cdot (\text{ArbitrageValue}_i(t, s_i) - s_i \cdot a_i)", 
+               "Optimal RFQ Strategy")
+
+# Calculate required trades based on basket completion
+if 'z_integers' in locals():
+    required_trades = W @ z_integers - close_position
+    
+    # Determine trade direction for each bond
+    trade_directions = np.sign(required_trades)
+    
+    # Function to find optimal RFQ parameters
+    def optimize_rfq(bond_idx, size, direction):
+        """Find optimal price aggression for an RFQ"""
+        
+        def objective(aggression):
+            # Calculate fill probability
+            prob = calc_fill_probability(bond_idx, abs(size), aggression, direction, market_condition)
+            
+            # Calculate expected profit (simple model)
+            base_arb = arb_values.mean() / 100  # Average arbitrage value in decimal form
+            arb_per_dv01 = base_arb / W.sum() * n_bonds  # Approximate per-bond value
+            
+            # Cost of aggression in same units as arb value
+            aggression_cost = aggression / 10000  # Convert bp to decimal
+            
+            # Expected profit is probability * (arb value - cost of aggression)
+            exp_profit = prob * (arb_per_dv01 - aggression_cost) * abs(size)
+            
+            # Negative because we're minimizing
+            return -exp_profit
+        
+        # Find optimal aggression between -2 and +3 bp
+        result = minimize(objective, 0, bounds=[(-2, 3)])
+        
+        if result.success:
+            opt_aggression = result.x[0]
+            fill_prob = calc_fill_probability(bond_idx, abs(size), opt_aggression, direction, market_condition)
+            exp_profit = -objective(opt_aggression)
+            return opt_aggression, fill_prob, exp_profit
+        else:
+            return 0, 0, 0
+    
+    # Find optimal RFQ parameters for each bond
+    rfq_results = []
+    
+    for i in range(n_bonds):
+        if abs(required_trades[i]) > 1e-6:  # Only consider non-zero trades
+            size = abs(required_trades[i])
+            direction = trade_directions[i]
+            
+            opt_aggression, fill_prob, exp_profit = optimize_rfq(i, size, direction)
+            
+            rfq_results.append({
+                'Bond': f'Bond_{i+1}',
+                'Size (DV01)': size,
+                'Direction': 'Buy' if direction > 0 else 'Sell',
+                'Optimal Aggression (bp)': opt_aggression,
+                'Fill Probability': fill_prob,
+                'Expected Profit': exp_profit
+            })
+    
+    # Display RFQ results
+    if rfq_results:
+        rfq_df = pd.DataFrame(rfq_results)
+        rfq_df = rfq_df.sort_values('Fill Probability', ascending=False)
+        display(rfq_df)
+        
+        # Visualize RFQ optimization for one bond
+        sample_bond = rfq_df.iloc[0]['Bond']
+        sample_idx = int(sample_bond.split('_')[1]) - 1
+        sample_size = rfq_df.iloc[0]['Size (DV01)']
+        sample_direction = 1 if rfq_df.iloc[0]['Direction'] == 'Buy' else -1
+        
+        # Plot expected profit vs aggression
+        aggr_range = np.linspace(-3, 5, 100)
+        probs = [calc_fill_probability(sample_idx, sample_size, a, sample_direction, market_condition) for a in aggr_range]
+        
+        # Calculate expected profit
+        base_arb = arb_values.mean() / 100
+        arb_per_dv01 = base_arb / W.sum() * n_bonds
+        exp_profits = [p * (arb_per_dv01 - a/10000) * sample_size for p, a in zip(probs, aggr_range)]
+        
+        plt.figure(figsize=(15, 6))
+        
+        plt.subplot(1, 2, 1)
+        plt.plot(aggr_range, probs, 'b-')
+        plt.axvline(x=rfq_df.iloc[0]['Optimal Aggression (bp)'], color='r', linestyle='--', 
+                   label=f'Optimal: {rfq_df.iloc[0]["Optimal Aggression (bp)"]:.2f} bp')
+        plt.xlabel('Price Aggression (bp)')
+        plt.ylabel('Fill Probability')
+        plt.title(f'Fill Probability vs Aggression for {sample_bond}')
+        plt.legend()
+        plt.grid(True)
+        
+        plt.subplot(1, 2, 2)
+        plt.plot(aggr_range, exp_profits, 'g-')
+        plt.axvline(x=rfq_df.iloc[0]['Optimal Aggression (bp)'], color='r', linestyle='--',
+                   label=f'Optimal: {rfq_df.iloc[0]["Optimal Aggression (bp)"]:.2f} bp')
+        plt.xlabel('Price Aggression (bp)')
+        plt.ylabel('Expected Profit')
+        plt.title(f'Expected Profit vs Aggression for {sample_bond}')
+        plt.legend()
+        plt.grid(True)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Simulate RFQ execution
+        display(Markdown("### RFQ Execution Simulation"))
+        
+        # Group bonds by liquidity tiers
+        n_tiers = 3
+        liquidity_tiers = pd.qcut(1/liquidity_factor, n_tiers, labels=False)
+        
+        # Assign each bond to a tier
+        for i, row in enumerate(rfq_results):
+            bond_idx = int(row['Bond'].split('_')[1]) - 1
+            tier = liquidity_tiers[bond_idx]
+            rfq_results[i]['Liquidity Tier'] = tier + 1  # 1-indexed for display
+        
+        rfq_df = pd.DataFrame(rfq_results)
+        
+        # Sort by tier (most liquid first) and size (largest first within tier)
+        rfq_df = rfq_df.sort_values(['Liquidity Tier', 'Size (DV01)'], 
+                                    ascending=[True, False])
+        
+        # Simulate execution with random outcomes based on fill probability
+        execution_results = []
+        total_filled = 0
+        total_value = 0
+        
+        for i, row in rfq_df.iterrows():
+            # Simulate fill based on probability
+            is_filled = np.random.random() < row['Fill Probability']
+            
+            execution_results.append({
+                'Bond': row['Bond'],
+                'Size (DV01)': row['Size (DV01)'],
+                'Direction': row['Direction'],
+                'Aggression (bp)': row['Optimal Aggression (bp)'],
+                'Fill Probability': row['Fill Probability'],
+                'Filled': 'Yes' if is_filled else 'No',
+                'Profit if Filled': row['Expected Profit'] / row['Fill Probability'] if row['Fill Probability'] > 0 else 0
+            })
+            
+            if is_filled:
+                total_filled += 1
+                total_value += execution_results[-1]['Profit if Filled']
+        
+        execution_df = pd.DataFrame(execution_results)
+        display(execution_df)
+        
+        # Summary statistics
+        fill_rate = total_filled / len(execution_df) if len(execution_df) > 0 else 0
+        display(Markdown(f"**Fill Rate:** {fill_rate:.2%}"))
+        display(Markdown(f"**Total Realized Value:** ${total_value:.2f}"))
+        
+        # Visualize fill rate by liquidity tier
+        execution_df['Liquidity Tier'] = rfq_df['Liquidity Tier'].values
+        tier_fill_rates = execution_df.groupby('Liquidity Tier').apply(
+            lambda x: (x['Filled'] == 'Yes').mean()
+        )
+        
+        plt.figure(figsize=(10, 6))
+        tier_fill_rates.plot(kind='bar', color='skyblue')
+        plt.axhline(y=fill_rate, color='red', linestyle='--', 
+                   label=f'Overall: {fill_rate:.2%}')
+        plt.xlabel('Liquidity Tier')
+        plt.ylabel('Fill Rate')
+        plt.title('RFQ Fill Rate by Liquidity Tier')
+        plt.legend()
+        plt.xticks(rotation=0)
+        plt.ylim(0, 1)
+        for i, v in enumerate(tier_fill_rates):
+            plt.text(i, v + 0.05, f'{v:.2%}', ha='center')
+        plt.tight_layout()
+        plt.show()
+
+# 8. Comprehensive ETF Create/Redeem Framework
+display(Markdown("## 8. Complete ETF Create/Redeem Framework Simulation"))
+
+# Initialize for simulation
+np.random.seed(42)
+initial_pos = np.zeros(n_bonds)  # Start with flat position
+
+# Parameters for the simulation
+lambda_basket_value = 0.5
+risk_aversion = 0.2
+max_iterations = 40
+transition_threshold = 0.15  # When to switch to integer optimization
+rfq_execution_frequency = 8  # How often to execute RFQs (every N steps)
+
+# Containers for tracking
+positions_history = [initial_pos.copy()]
+basket_projections = []
+completion_rates = []
+integer_baskets_history = []
+phase_history = ['Approach']
+arb_values_history = []
+
+# For visual tracking, we'll focus on one ETF initially
+active_baskets = [0]  # Start with the first ETF
+
+# Update market conditions over time
+market_conditions = np.random.normal(0, 0.5, max_iterations)
+market_imbalances = np.zeros((max_iterations, n_bonds))
+for t in range(max_iterations):
+    market_imbalances[t] = np.random.uniform(-0.5, 0.5, n_bonds)
+
+# Update ETF arbitrage values over time (simplified)
+etf_arb_values = np.zeros((max_iterations, n_etfs))
+for t in range(max_iterations):
+    # Random walk for premium/discount
+    if t == 0:
+        etf_premium_t = etf_premium.copy()
+    else:
+        etf_premium_t = etf_premium_t + np.random.normal(0, 0.05, n_etfs)
+    
+    # Calculate arbitrage values
+    etf_arb_values[t] = [(prem/100 - fee - bi - nt - sc - ra)
+                         for prem, fee, bi, nt, sc, ra in 
+                         zip(etf_premium_t, creation_fees, 
+                             bid_ask_impact, nav_timing, 
+                             settlement_cost, risk_adjustments)]
+
+# Simulation loop
+current_pos = initial_pos.copy()
+
+for t in range(max_iterations):
+    market_condition = market_conditions[t]
+    market_imbalance = market_imbalances[t]
+    arb_values = etf_arb_values[t]
+    
+    # Store current state
+    positions_history.append(current_pos.copy())
+    arb_values_history.append(arb_values.copy())
+    
+    # Compute projections and completion rates for all baskets
+    projections = []
+    completions = []
+    integer_baskets = []
+    
+    for j in range(n_etfs):
+        w_j = basket_weights[j]
+        u_j = basket_directions[j]
+        
+        # Project position onto basket direction
+        proj = np.dot(current_pos, u_j) / np.dot(w_j, u_j) 
+        int_baskets = np.floor(proj) if proj > 0 else 0
+        
+        # Calculate completion percentage
+        completion = 1.0 - np.linalg.norm(current_pos - int_baskets * w_j) / np.linalg.norm(int_baskets * w_j) if int_baskets > 0 else 0.0
+        
+        projections.append(proj)
+        completions.append(completion)
+        integer_baskets.append(int_baskets)
+    
+    basket_projections.append(projections)
+    completion_rates.append(completions)
+    integer_baskets_history.append(integer_baskets)
+    
+    # Determine active basket(s) based on arbitrage values
+    if t % 8 == 0:  # Periodically update active baskets
+        # Select baskets with positive arbitrage value
+        candidates = [j for j in range(n_etfs) if arb_values[j] > 0]
+        
+        if len(candidates) > 0:
+            # Select up to 2 baskets with highest arb value
+            active_baskets = sorted(candidates, key=lambda j: arb_values[j], reverse=True)[:2]
+        else:
+            # If no positive arb, use the least negative
+            active_baskets = [np.argmax(arb_values)]
+    
+    # Phase selection logic
+    max_completion = max([completions[j] for j in active_baskets]) if active_baskets else 0
+    
+    if max_completion > transition_threshold and 'Integer' not in phase_history[-1]:
+        # Transition to Integer Optimization phase
+        phase_history.append('Integer')
+        
+        # Create basket matrix for active baskets
+        W_active = np.vstack([basket_weights[j] for j in active_baskets]).T
+        
+        # Simplified integer optimization for demonstration
+        n_active = len(active_baskets)
+        z = cp.Variable(n_active, integer=True)
+        p_residual = cp.Variable(n_bonds)
+        
+        # Objective components
+        p_final = W_active @ z + p_residual  # Final portfolio
+        execution_cost = cp.quad_form(p_final - current_pos, Pi_inv_Gamma_Pi_inv)
+        risk_cost = cp.quad_form(p_final, cov_matrix) * risk_aversion
+        arb_value = z @ np.array([arb_values[j] for j in active_baskets])
+        
+        objective = cp.Minimize(execution_cost + risk_cost - arb_value)
+        
+        # Constraints
+        constraints = [
+            z >= 0,                           # Non-negative baskets
+            cp.sum(z) <= 5,                   # Maximum 5 total baskets
+            cp.quad_form(p_residual, cov_matrix) <= 0.1 * cp.quad_form(current_pos, cov_matrix)  # Limit residual risk
+        ]
+        
+        # Solve the problem
+        prob = cp.Problem(objective, constraints)
+        try:
+            prob.solve(solver=cp.ECOS_BB)  # Mixed-integer solver
+            
+            if prob.status == 'optimal':
+                # Extract solutions
+                z_opt = z.value
+                z_integers = np.round(z_opt).astype(int)
+                
+                # Convert to full basket quantities
+                z_full = np.zeros(n_etfs)
+                for i, j in enumerate(active_baskets):
+                    z_full[j] = z_integers[i]
+                
+                # Target position after basket creation
+                target_pos = sum(z_full[j] * basket_weights[j] for j in range(n_etfs))
+                
+                # Calculate required trades
+                required_trades = target_pos - current_pos
+                
+                # Simulate RFQ execution phase
+                phase_history.append('RFQ')
+                
+                # Determine fills based on fill probabilities
+                trades_executed = np.zeros_like(required_trades)
+                
+                for i in range(n_bonds):
+                    if abs(required_trades[i]) > 1e-6:
+                        direction = np.sign(required_trades[i])
+                        size = abs(required_trades[i])
+                        
+                        # Find optimal aggression
+                        opt_aggression, fill_prob, _ = optimize_rfq(i, size, direction)
+                        
+                        # Simulate fill
+                        is_filled = np.random.random() < fill_prob
+                        
+                        if is_filled:
+                            trades_executed[i] = required_trades[i]
+                
+                # Update position based on filled RFQs
+                current_pos = current_pos + trades_executed
+                
+                # Return to approach phase
+                phase_history.append('Approach')
+            else:
+                # Continue with approach phase
+                phase_history.append('Approach')
+        except Exception as e:
+            # Fall back to approach phase
+            phase_history.append('Approach')
+    else:
+        # Continue with Approach phase
+        phase_history.append('Approach')
+        
+        # Calculate geodesic flow
+        flow = np.zeros_like(current_pos)
+        
+        # Standard geodesic flow component
+        standard_flow = -M_f_inv @ K_f @ current_pos
+        flow += standard_flow
+        
+        # Add basket alignment for active baskets
+        for j in active_baskets:
+            u_j = basket_directions[j]
+            lambda_basket = lambda_basket_value * (1 + 2 * completions[j])  # Increase with completion
+            basket_flow = lambda_basket * M_f_inv @ (u_j.reshape(-1, 1) @ u_j.reshape(1, -1)) @ current_pos
+            flow += basket_flow
+        
+        # Update position using Euler integration
+        current_pos = current_pos + flow * dt
+
+# Analysis of simulation results
+phases_array = np.array(phase_history)
+approach_phases = np.where(phases_array == 'Approach')[0]
+integer_phases = np.where(phases_array == 'Integer')[0]
+rfq_phases = np.where(phases_array == 'RFQ')[0]
+
+positions_array = np.array(positions_history)
+projections_array = np.array(basket_projections)
+completion_array = np.array(completion_rates)
+integer_baskets_array = np.array(integer_baskets_history)
+arb_values_array = np.array(arb_values_history)
+
+# Plot the simulation history
+display(Markdown("### Simulation Results"))
+
+# Figure 1: Basket projections over time
+plt.figure(figsize=(15, 8))
+
+plt.subplot(2, 1, 1)
+for j in range(n_etfs):
+    plt.plot(range(len(projections_array)), projections_array[:, j], label=f'ETF {j+1}')
+# Mark phase transitions
+for i in integer_phases:
+    plt.axvline(x=i, color='r', linestyle='--', alpha=0.3)
+for i in rfq_phases:
+    plt.axvline(x=i, color='g', linestyle='--', alpha=0.3)
+plt.xlabel('Iteration')
+plt.ylabel('Basket Projection')
+plt.title('ETF Basket Projections Over Time')
+plt.legend()
+plt.grid(True)
+
+plt.subplot(2, 1, 2)
+for j in range(n_etfs):
+    plt.plot(range(len(completion_array)), completion_array[:, j], label=f'ETF {j+1}')
+plt.axhline(y=transition_threshold, color='r', linestyle='--', label=f'Transition Threshold ({transition_threshold})')
+# Mark phase transitions
+for i in integer_phases:
+    plt.axvline(x=i, color='r', linestyle='--', alpha=0.3)
+for i in rfq_phases:
+    plt.axvline(x=i, color='g', linestyle='--', alpha=0.3)
+plt.xlabel('Iteration')
+plt.ylabel('Completion Percentage')
+plt.title('Basket Completion Percentage')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Figure 2: Position evolution and arbitrage values
+plt.figure(figsize=(15, 12))
+
+plt.subplot(3, 1, 1)
+for i in range(n_bonds):
+    plt.plot(range(len(positions_array)), positions_array[:, i], alpha=0.5, label=f'Bond {i+1}' if i < 5 else '')
+# Mark phase transitions
+for i in integer_phases:
+    plt.axvline(x=i, color='r', linestyle='--', alpha=0.3)
+for i in rfq_phases:
+    plt.axvline(x=i, color='g', linestyle='--', alpha=0.3)
+plt.xlabel('Iteration')
+plt.ylabel('Position (DV01)')
+plt.title('Bond Positions Over Time')
+plt.legend(ncol=5)
+plt.grid(True)
+
+plt.subplot(3, 1, 2)
+for j in range(n_etfs):
+    plt.plot(range(len(arb_values_array)), arb_values_array[:, j] * 10000, label=f'ETF {j+1}')  # Convert to bp
+plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+# Mark phase transitions
+for i in integer_phases:
+    plt.axvline(x=i, color='r', linestyle='--', alpha=0.3)
+for i in rfq_phases:
+    plt.axvline(x=i, color='g', linestyle='--', alpha=0.3)
+plt.xlabel('Iteration')
+plt.ylabel('Arbitrage Value (bp)')
+plt.title('ETF Arbitrage Values Over Time')
+plt.legend()
+plt.grid(True)
+
+plt.subplot(3, 1, 3)
+# Calculate risk over time
+risk_over_time = [np.sqrt(pos @ cov_matrix @ pos) for pos in positions_array]
+plt.plot(range(len(risk_over_time)), risk_over_time, 'b-')
+# Mark phase transitions
+for i in integer_phases:
+    plt.axvline(x=i, color='r', linestyle='--', alpha=0.3, label='Integer Phase' if i == integer_phases[0] else '')
+for i in rfq_phases:
+    plt.axvline(x=i, color='g', linestyle='--', alpha=0.3, label='RFQ Phase' if i == rfq_phases[0] else '')
+plt.xlabel('Iteration')
+plt.ylabel('Portfolio Risk (bp/day)')
+plt.title('Portfolio Risk Over Time')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Figure 3: Visualize phases in PCA space
+pca = PCA(n_components=2)
+pos_pca = pca.fit_transform(positions_array)
+
+plt.figure(figsize=(12, 10))
+plt.scatter(pos_pca[:, 0], pos_pca[:, 1], c=range(len(pos_pca)), cmap='viridis', 
+            s=30, alpha=0.7)
+plt.plot(pos_pca[:, 0], pos_pca[:, 1], 'k-', alpha=0.3)
+
+# Mark phases
+for i in integer_phases:
+    plt.scatter(pos_pca[i, 0], pos_pca[i, 1], c='r', s=100, marker='x')
+for i in rfq_phases:
+    plt.scatter(pos_pca[i, 0], pos_pca[i, 1], c='g', s=100, marker='o')
+
+# Transform basket directions into PCA space
+basket_directions_pca = []
+for j in range(n_etfs):
+    # Create points along basket direction
+    basket_points = np.array([n * basket_weights[j] for n in range(6)])
+    basket_points_pca = pca.transform(basket_points)
+    basket_directions_pca.append(basket_points_pca)
+    
+    # Plot basket directions
+    plt.plot(basket_points_pca[:, 0], basket_points_pca[:, 1], '--', 
+             label=f'ETF {j+1} Direction')
+
+plt.colorbar(label='Iteration')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.title('Portfolio Trajectory in PCA Space')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Summary statistics
+display(Markdown("### Summary Statistics"))
+
+# Count transitions
+n_integer_phases = len(np.where(np.diff(phases_array) == ('Approach' != 'Integer'))[0])
+n_rfq_phases = len(rfq_phases)
+
+# Calculate final portfolio metrics
+final_pos = positions_array[-1]
+final_risk = np.sqrt(final_pos @ cov_matrix @ final_pos)
+
+# Calculate basket decomposition of final position
+basket_components = np.zeros((n_etfs, n_bonds))
+for j in range(n_etfs):
+    # Project onto each basket
+    w_j = basket_weights[j]
+    proj = np.dot(final_pos, w_j) / np.dot(w_j, w_j)
+    basket_components[j] = proj * w_j
+
+# Sum all basket components
+total_basket_components = np.sum(basket_components, axis=0)
+residual_pos = final_pos - total_basket_components
+
+# Calculate metrics
+total_component_risk = np.sqrt(total_basket_components @ cov_matrix @ total_basket_components)
+residual_risk = np.sqrt(residual_pos @ cov_matrix @ residual_pos)
+residual_pct = residual_risk / final_risk * 100 if final_risk > 0 else 0
+
+# Display summary
+stats = {
+    'Initial Risk': np.sqrt(initial_pos @ cov_matrix @ initial_pos),
+    'Final Risk': final_risk,
+    'Basket Phase Transitions': n_integer_phases,
+    'RFQ Executions': n_rfq_phases,
