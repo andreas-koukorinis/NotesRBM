@@ -1,0 +1,24 @@
+-- Federated query joining live state with historical patterns
+WITH live_signals AS (
+  SELECT * FROM redis.momentum_signals 
+  WHERE timestamp > NOW() - INTERVAL '1 hour'
+),
+historical_performance AS (
+  SELECT 
+    instrument_id,
+    clock_type,
+    AVG(signal_return) as avg_return,
+    SHARPE(signal_return) as sharpe_ratio
+  FROM delta.signal_history
+  WHERE date >= CURRENT_DATE - 60
+  GROUP BY instrument_id, clock_type
+)
+SELECT 
+  l.instrument_id,
+  l.signal_strength,
+  h.sharpe_ratio,
+  h.avg_return * l.signal_strength as expected_return
+FROM live_signals l
+JOIN historical_performance h 
+  ON l.instrument_id = h.instrument_id 
+  AND l.clock_type = h.clock_type;
