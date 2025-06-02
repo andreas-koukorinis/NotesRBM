@@ -1,0 +1,887 @@
+\subsection{Credit Macro Strategies}
+
+\subsubsection{Use Case E2: Orthogonalization Impact on Credit Macro Factor Strategy}
+\textbf{Objective:} Measure the trade-off between strategy independence and performance when orthogonalizing a credit-focused macro factor strategy against traditional credit risk premia.
+
+\textbf{Mathematical Framework:}
+Let $\text{Signal}_{\text{macro},i,t}$ be the raw macro-driven signal for credit instrument $i$ at time $t$. The orthogonalization process removes exposure to traditional credit factors:
+
+\begin{equation}
+\text{Signal}_{\text{macro},i,t} = \alpha_i + \sum_{k=1}^{K} \beta_{i,k} \cdot \text{FactorSignal}_{k,i,t} + \text{Signal}_{\text{ortho},i,t}
+\end{equation}
+
+where $\text{FactorSignal}_{k,i,t}$ represents traditional credit factors (carry, duration, market beta). The orthogonalized signal is the residual $\text{Signal}_{\text{ortho},i,t}$.
+
+For portfolio weights:
+\begin{equation}
+w_{\text{macro},i,t} = \alpha'_i + \sum_{k=1}^{K} \beta'_{i,k} \cdot w_{\text{factor},k,i,t} + w_{\text{ortho},i,t}
+\end{equation}
+
+\textbf{Implementation:}
+\begin{lstlisting}[language=python,caption={Credit Strategy Orthogonalization}]
+class CreditMacroOrthogonalizer:
+    def __init__(self, factors=['carry', 'duration', 'beta']):
+        self.factors = factors
+        self.models = {}
+        
+    def orthogonalize_signals(self, macro_signals, factor_signals):
+        """Orthogonalize macro signals against credit factors"""
+        orthogonal_signals = pd.DataFrame(index=macro_signals.index)
+        
+        for instrument in macro_signals.columns:
+            # Prepare factor matrix
+            X = pd.DataFrame({
+                f: factor_signals[f][instrument] 
+                for f in self.factors
+            })
+            
+            y = macro_signals[instrument]
+            
+            # Rolling regression for time-varying betas
+            residuals = []
+            for t in range(252, len(y)):
+                # Use past year for regression
+                X_train = X.iloc[t-252:t]
+                y_train = y.iloc[t-252:t]
+                
+                # Fit model
+                model = LinearRegression()
+                model.fit(X_train, y_train)
+                
+                # Calculate residual for current period
+                X_current = X.iloc[t:t+1]
+                y_current = y.iloc[t:t+1]
+                y_pred = model.predict(X_current)
+                
+                residual = y_current.values[0] - y_pred[0]
+                residuals.append(residual)
+            
+            orthogonal_signals[instrument] = residuals
+            
+        return orthogonal_signals
+    
+    def analyze_impact(self, base_returns, ortho_returns, factor_returns):
+        """Compare base vs orthogonalized strategy metrics"""
+        results = {
+            'base': {
+                'sharpe': self._calculate_sharpe(base_returns),
+                'correlation': {
+                    f: base_returns.corr(factor_returns[f]) 
+                    for f in self.factors
+                }
+            },
+            'orthogonalized': {
+                'sharpe': self._calculate_sharpe(ortho_returns),
+                'correlation': {
+                    f: ortho_returns.corr(factor_returns[f]) 
+                    for f in self.factors
+                }
+            }
+        }
+        
+        results['sharpe_cost'] = (
+            results['base']['sharpe'] - 
+            results['orthogonalized']['sharpe']
+        )
+        
+        return results
+\end{lstlisting}
+
+\textbf{Query Implementation:}
+\begin{lstlisting}[language=sql]
+-- Calculate orthogonalization regression
+WITH factor_exposures AS (
+    SELECT 
+        date,
+        instrument_id,
+        macro_signal,
+        carry_signal,
+        duration_signal,
+        market_beta_signal
+    FROM signal_data
+),
+rolling_regression AS (
+    SELECT 
+        date,
+        instrument_id,
+        macro_signal,
+        -- Rolling 252-day regression coefficients
+        REGR_SLOPE(macro_signal, carry_signal) OVER w as beta_carry,
+        REGR_SLOPE(macro_signal, duration_signal) OVER w as beta_duration,
+        REGR_SLOPE(macro_signal, market_beta_signal) OVER w as beta_market,
+        REGR_INTERCEPT(macro_signal, carry_signal) OVER w as alpha
+    FROM factor_exposures
+    WINDOW w AS (
+        PARTITION BY instrument_id 
+        ORDER BY date 
+        ROWS BETWEEN 252 PRECEDING AND CURRENT ROW
+    )
+),
+orthogonalized_signals AS (
+    SELECT 
+        date,
+        instrument_id,
+        macro_signal - (
+            alpha + 
+            beta_carry * carry_signal + 
+            beta_duration * duration_signal + 
+            beta_market * market_beta_signal
+        ) as ortho_signal
+    FROM rolling_regression
+)
+-- Compare performance metrics
+SELECT 
+    'Base' as strategy_type,
+    SHARPE_RATIO(returns) as sharpe,
+    CORR(returns, carry_factor_returns) as carry_correlation,
+    MAX_DRAWDOWN(returns) as max_dd
+FROM base_strategy_returns
+UNION ALL
+SELECT 
+    'Orthogonalized' as strategy_type,
+    SHARPE_RATIO(returns) as sharpe,
+    CORR(returns, carry_factor_returns) as carry_correlation,
+    MAX_DRAWDOWN(returns) as max_dd
+FROM ortho_strategy_returns;
+\end{lstlisting}
+
+\subsubsection{Use Case E3: Credit Signal Timing Value in Crisis Periods}
+\textbf{Objective:} Quantify the impact of sentiment-based timing filters on systematic credit strategies during crisis periods.
+
+\textbf{Mathematical Framework:}
+The timing overlay adjusts positions based on market sentiment:
+\begin{equation}
+w_{\text{timed},i,t} = w_{\text{base},i,t} \cdot f(\text{SentimentIndicator}_t)
+\end{equation}
+
+where the scaling function is:
+\begin{equation}
+f(\text{Sentiment}_t) = \begin{cases}
+0.0 & \text{if } \text{Sentiment}_t > \theta_{\text{extreme}} \\
+0.5 & \text{if } \text{Sentiment}_t > \theta_{\text{high}} \\
+1.0 & \text{if } \theta_{\text{low}} < \text{Sentiment}_t < \theta_{\text{high}} \\
+1.2 & \text{if } \text{Sentiment}_t < \theta_{\text{low}}
+\end{cases}
+\end{equation}
+
+\textbf{Implementation:}
+\begin{lstlisting}[language=python,caption={Credit Strategy Sentiment Timing}]
+class CreditSentimentTimer:
+    def __init__(self, thresholds={'extreme': 80, 'high': 65, 
+                                   'low': 35}):
+        self.thresholds = thresholds
+        
+    def calculate_sentiment_indicator(self, market_data):
+        """Composite credit market sentiment indicator"""
+        components = {
+            'vix': market_data['VIX'] / market_data['VIX'].rolling(252).mean(),
+            'hy_spread': (market_data['HY_OAS'] - market_data['IG_OAS']).rolling(21).mean(),
+            'flows': -market_data['HY_Fund_Flows'].rolling(5).sum() / market_data['HY_AUM'],
+            'put_call': market_data['CDX_Put_Call_Ratio']
+        }
+        
+        # Z-score each component
+        z_scores = {}
+        for name, series in components.items():
+            z_scores[name] = (
+                (series - series.rolling(252).mean()) / 
+                series.rolling(252).std()
+            )
+        
+        # Equal weight composite
+        sentiment = sum(z_scores.values()) / len(z_scores)
+        
+        # Normalize to 0-100 scale
+        sentiment_pct = stats.norm.cdf(sentiment) * 100
+        
+        return sentiment_pct
+    
+    def apply_timing(self, base_positions, sentiment):
+        """Apply sentiment-based position scaling"""
+        scaling = pd.Series(index=sentiment.index, dtype=float)
+        
+        scaling[sentiment > self.thresholds['extreme']] = 0.0
+        scaling[sentiment > self.thresholds['high']] = 0.5
+        scaling[sentiment < self.thresholds['low']] = 1.2
+        scaling[scaling.isna()] = 1.0  # Default
+        
+        # Smooth transitions to avoid whipsaws
+        scaling = scaling.ewm(span=5).mean()
+        
+        timed_positions = base_positions.multiply(scaling, axis=0)
+        
+        return timed_positions, scaling
+    
+    def analyze_crisis_performance(self, returns_base, returns_timed, 
+                                 crisis_periods):
+        """Compare performance during crisis periods"""
+        results = {}
+        
+        for crisis_name, (start, end) in crisis_periods.items():
+            crisis_base = returns_base[start:end]
+            crisis_timed = returns_timed[start:end]
+            
+            results[crisis_name] = {
+                'base_return': crisis_base.sum(),
+                'timed_return': crisis_timed.sum(),
+                'base_max_dd': self._max_drawdown(crisis_base),
+                'timed_max_dd': self._max_drawdown(crisis_timed),
+                'base_vol': crisis_base.std() * np.sqrt(252),
+                'timed_vol': crisis_timed.std() * np.sqrt(252)
+            }
+            
+            # Protection benefit
+            results[crisis_name]['dd_reduction'] = (
+                results[crisis_name]['base_max_dd'] - 
+                results[crisis_name]['timed_max_dd']
+            )
+            
+        return results
+\end{lstlisting}
+
+\textbf{Query Implementation:}
+\begin{lstlisting}[language=sql]
+-- Define sentiment-based scaling
+WITH sentiment_indicators AS (
+    SELECT 
+        date,
+        vix_level,
+        (hy_oas - ig_oas) as credit_spread_diff,
+        cdx_skew,
+        -- Composite sentiment (higher = more risk-off)
+        PERCENT_RANK() OVER (ORDER BY vix_level) * 0.3 +
+        PERCENT_RANK() OVER (ORDER BY credit_spread_diff) * 0.4 +
+        PERCENT_RANK() OVER (ORDER BY cdx_skew) * 0.3 as sentiment_score
+    FROM market_data
+),
+position_scaling AS (
+    SELECT 
+        date,
+        CASE 
+            WHEN sentiment_score > 0.80 THEN 0.0  -- Full risk-off
+            WHEN sentiment_score > 0.65 THEN 0.5  -- Reduce risk
+            WHEN sentiment_score < 0.35 THEN 1.2  -- Increase risk
+            ELSE 1.0  -- Normal
+        END as scaling_factor
+    FROM sentiment_indicators
+),
+crisis_performance AS (
+    SELECT 
+        'GFC' as crisis,
+        strategy_type,
+        SUM(daily_return) as total_return,
+        MIN(SUM(daily_return) OVER (ORDER BY date)) as max_drawdown
+    FROM (
+        SELECT 
+            date,
+            'Base' as strategy_type,
+            base_return as daily_return
+        FROM strategy_returns
+        WHERE date BETWEEN '2008-09-01' AND '2009-03-31'
+        UNION ALL
+        SELECT 
+            date,
+            'Timed' as strategy_type,
+            base_return * scaling_factor as daily_return
+        FROM strategy_returns s
+        JOIN position_scaling p USING (date)
+        WHERE date BETWEEN '2008-09-01' AND '2009-03-31'
+    ) t
+    GROUP BY crisis, strategy_type
+)
+SELECT * FROM crisis_performance;
+\end{lstlisting}
+
+\subsubsection{Use Case E4: Regional Macro Influence on Global Credit Markets}
+\textbf{Objective:} Analyze how US macroeconomic developments influence credit markets globally, with emphasis on monetary policy regime dependence.
+
+\textbf{Mathematical Framework:}
+The influence model:
+\begin{equation}
+\Delta S_{\text{nonUS},c,t \to t+H} = \alpha_c + \beta_{\text{US},c} \cdot \text{Nowcast}_{\text{US,infl},t} + \beta_{\text{local},c} \cdot \text{Nowcast}_{\text{local},t} + \varepsilon_{c,t}
+\end{equation}
+
+The explanatory power varies by Fed regime:
+\begin{equation}
+R^2_c(\text{regime}) = \frac{\text{ESS}_{\text{regime}}}{\text{TSS}_{\text{regime}}}
+\end{equation}
+
+\textbf{Implementation:}
+\begin{lstlisting}[language=python,caption={Cross-Region Credit Influence Analysis}]
+class RegionalCreditInfluence:
+    def __init__(self, regions=['EUR', 'GBP', 'JPY', 'EM']):
+        self.regions = regions
+        self.results = {}
+        
+    def define_fed_regimes(self, fed_data):
+        """Classify Fed policy regimes"""
+        regimes = pd.Series(index=fed_data.index, dtype=str)
+        
+        # Calculate rate changes
+        rate_change = fed_data['fed_funds'].diff(252)
+        
+        # QE periods
+        qe_periods = [
+            ('2008-11', '2010-06'),  # QE1
+            ('2010-11', '2011-06'),  # QE2
+            ('2012-09', '2014-10'),  # QE3
+        ]
+        
+        # Classify regimes
+        regimes[rate_change > 0.5] = 'Tightening'
+        regimes[rate_change < -0.5] = 'Easing'
+        regimes[regimes.isna()] = 'Neutral'
+        
+        # Override with QE periods
+        for start, end in qe_periods:
+            regimes[start:end] = 'QE'
+            
+        return regimes
+    
+    def analyze_influence(self, credit_spreads, us_nowcast, 
+                         local_nowcasts, fed_regimes):
+        """Analyze US influence on regional credit markets"""
+        
+        for region in self.regions:
+            self.results[region] = {}
+            
+            # Forward spread changes
+            fwd_changes = credit_spreads[region].diff(21).shift(-21)
+            
+            # Full sample regression
+            X_full = pd.DataFrame({
+                'us_nowcast': us_nowcast,
+                'local_nowcast': local_nowcasts[region]
+            })
+            y_full = fwd_changes
+            
+            # Align and clean
+            data = pd.concat([X_full, y_full], axis=1).dropna()
+            
+            # Full sample R-squared
+            model_full = LinearRegression()
+            model_full.fit(data[['us_nowcast', 'local_nowcast']], 
+                          data[fwd_changes.name])
+            r2_full = model_full.score(
+                data[['us_nowcast', 'local_nowcast']], 
+                data[fwd_changes.name]
+            )
+            
+            self.results[region]['full_sample'] = {
+                'r2': r2_full,
+                'us_beta': model_full.coef_[0],
+                'local_beta': model_full.coef_[1]
+            }
+            
+            # Regime-specific analysis
+            for regime in ['Tightening', 'Easing', 'QE', 'Neutral']:
+                regime_mask = fed_regimes == regime
+                regime_data = data[regime_mask]
+                
+                if len(regime_data) > 50:  # Minimum sample
+                    model_regime = LinearRegression()
+                    model_regime.fit(
+                        regime_data[['us_nowcast', 'local_nowcast']], 
+                        regime_data[fwd_changes.name]
+                    )
+                    
+                    self.results[region][regime] = {
+                        'r2': model_regime.score(
+                            regime_data[['us_nowcast', 'local_nowcast']], 
+                            regime_data[fwd_changes.name]
+                        ),
+                        'us_beta': model_regime.coef_[0],
+                        'n_obs': len(regime_data)
+                    }
+                    
+        return self.results
+\end{lstlisting}
+
+\textbf{Query Implementation:}
+\begin{lstlisting}[language=sql]
+-- Analyze US macro influence on global credit markets
+WITH fed_regimes AS (
+    SELECT 
+        date,
+        CASE 
+            WHEN fed_funds_change_1y > 0.5 THEN 'Tightening'
+            WHEN fed_funds_change_1y < -0.5 THEN 'Easing'
+            WHEN date BETWEEN '2008-11-01' AND '2014-10-31' THEN 'QE'
+            ELSE 'Neutral'
+        END as regime
+    FROM fed_policy_data
+),
+regional_credit_data AS (
+    SELECT 
+        date,
+        eur_hy_spread_fwd_1m_change,
+        gbp_ig_spread_fwd_1m_change,
+        em_sovereign_cds_fwd_1m_change,
+        us_inflation_nowcast_zscore,
+        eur_inflation_nowcast_zscore,
+        gbp_inflation_nowcast_zscore
+    FROM macro_and_credit_data
+),
+regression_by_regime AS (
+    SELECT 
+        f.regime,
+        'EUR_HY' as market,
+        REGR_R2(r.eur_hy_spread_fwd_1m_change, 
+                r.us_inflation_nowcast_zscore) as r2_us_only,
+        REGR_SLOPE(r.eur_hy_spread_fwd_1m_change, 
+                   r.us_inflation_nowcast_zscore) as beta_us,
+        COUNT(*) as n_observations
+    FROM regional_credit_data r
+    JOIN fed_regimes f USING (date)
+    GROUP BY f.regime
+)
+SELECT 
+    regime,
+    market,
+    r2_us_only,
+    beta_us,
+    n_observations,
+    -- Compare R2 across regimes
+    r2_us_only - AVG(r2_us_only) OVER () as r2_vs_average
+FROM regression_by_regime
+ORDER BY regime, market;
+\end{lstlisting}
+
+\subsubsection{Use Case E5: Credit Portfolio Sensitivity to Global Macro Factors}
+\textbf{Objective:} Decompose credit portfolio returns into sensitivities to global growth versus inflation factors.
+
+\textbf{Mathematical Framework:}
+The factor model:
+\begin{equation}
+R_{\text{credit},t} = \alpha + \beta_{\text{growth}} \cdot F_{\text{growth},t} + \beta_{\text{infl}} \cdot F_{\text{infl},t} + \beta_{\text{rates}} \cdot \Delta r_t + \varepsilon_t
+\end{equation}
+
+Global factors are constructed as:
+\begin{align}
+F_{\text{growth},t} &= \sum_{c} w_c \cdot \text{Growth}_{\text{nowcast},c,t} \\
+F_{\text{infl},t} &= \sum_{c} w_c \cdot \text{Inflation}_{\text{nowcast},c,t}
+\end{align}
+
+\textbf{Implementation:}
+\begin{lstlisting}[language=python,caption={Credit Portfolio Macro Sensitivity}]
+class CreditMacroSensitivity:
+    def __init__(self):
+        self.factor_models = {}
+        
+    def construct_global_factors(self, country_nowcasts, gdp_weights):
+        """Build global growth and inflation factors"""
+        # GDP-weighted aggregation
+        global_growth = sum(
+            gdp_weights[country] * country_nowcasts[country]['growth']
+            for country in gdp_weights.keys()
+        )
+        
+        global_inflation = sum(
+            gdp_weights[country] * country_nowcasts[country]['inflation']
+            for country in gdp_weights.keys()
+        )
+        
+        # Alternative: PCA approach
+        growth_data = pd.DataFrame({
+            c: country_nowcasts[c]['growth'] 
+            for c in country_nowcasts.keys()
+        })
+        
+        pca_growth = PCA(n_components=1)
+        global_growth_pca = pca_growth.fit_transform(growth_data)
+        
+        return {
+            'growth_weighted': global_growth,
+            'inflation_weighted': global_inflation,
+            'growth_pca': global_growth_pca.flatten()
+        }
+    
+    def analyze_portfolio_sensitivity(self, portfolio_returns, 
+                                    global_factors, control_factors=None):
+        """Multi-factor regression analysis"""
+        # Prepare regression data
+        X = pd.DataFrame({
+            'global_growth': global_factors['growth_weighted'],
+            'global_inflation': global_factors['inflation_weighted']
+        })
+        
+        if control_factors is not None:
+            # Add control factors (e.g., rates, credit spread level)
+            for name, factor in control_factors.items():
+                X[name] = factor
+                
+        y = portfolio_returns
+        
+        # Align data
+        data = pd.concat([X, y], axis=1).dropna()
+        
+        # Full sample regression
+        model = LinearRegression()
+        X_data = data[X.columns]
+        y_data = data[y.name]
+        
+        model.fit(X_data, y_data)
+        
+        # Extract results
+        results = {
+            'betas': dict(zip(X.columns, model.coef_)),
+            'alpha': model.intercept_,
+            'r2': model.score(X_data, y_data)
+        }
+        
+        # Statistical significance (t-stats)
+        predictions = model.predict(X_data)
+        residuals = y_data - predictions
+        residual_std = np.std(residuals)
+        
+        # Standard errors of coefficients
+        X_array = X_data.values
+        XtX_inv = np.linalg.inv(X_array.T @ X_array)
+        se = np.sqrt(np.diag(XtX_inv) * residual_std**2)
+        
+        t_stats = model.coef_ / se
+        results['t_stats'] = dict(zip(X.columns, t_stats))
+        
+        # Rolling window analysis
+        rolling_betas = self._rolling_regression(
+            X_data, y_data, window=252
+        )
+        results['rolling_betas'] = rolling_betas
+        
+        return results
+    
+    def _rolling_regression(self, X, y, window=252):
+        """Calculate rolling factor sensitivities"""
+        rolling_results = {col: [] for col in X.columns}
+        rolling_results['r2'] = []
+        
+        for i in range(window, len(X)):
+            X_window = X.iloc[i-window:i]
+            y_window = y.iloc[i-window:i]
+            
+            model = LinearRegression()
+            model.fit(X_window, y_window)
+            
+            for j, col in enumerate(X.columns):
+                rolling_results[col].append(model.coef_[j])
+            
+            rolling_results['r2'].append(
+                model.score(X_window, y_window)
+            )
+            
+        # Convert to DataFrame with appropriate index
+        rolling_df = pd.DataFrame(
+            rolling_results, 
+            index=X.index[window:]
+        )
+        
+        return rolling_df
+\end{lstlisting}
+
+\textbf{Query Implementation:}
+\begin{lstlisting}[language=sql]
+-- Construct global factors and analyze sensitivities
+WITH global_factors AS (
+    SELECT 
+        date,
+        -- GDP-weighted global growth factor
+        SUM(country_growth_nowcast * gdp_weight) as global_growth,
+        -- GDP-weighted global inflation factor  
+        SUM(country_inflation_nowcast * gdp_weight) as global_inflation
+    FROM country_nowcasts
+    JOIN country_weights USING (country)
+    GROUP BY date
+),
+portfolio_data AS (
+    SELECT 
+        date,
+        strategy_return,
+        strategy_name
+    FROM credit_strategy_returns
+    WHERE strategy_name IN ('Global_IG', 'Global_HY', 'EM_Credit')
+),
+factor_regression AS (
+    SELECT 
+        p.strategy_name,
+        REGR_SLOPE(p.strategy_return, g.global_growth) as beta_growth,
+        REGR_SLOPE(p.strategy_return, g.global_inflation) as beta_inflation,
+        REGR_R2(p.strategy_return, g.global_growth) as r2_growth_only,
+        -- Multiple regression approximation using residuals
+        REGR_R2(
+            p.strategy_return - 
+            REGR_SLOPE(p.strategy_return, g.global_growth) * g.global_growth,
+            g.global_inflation
+        ) as r2_inflation_additional
+    FROM portfolio_data p
+    JOIN global_factors g USING (date)
+    GROUP BY p.strategy_name
+)
+SELECT 
+    strategy_name,
+    beta_growth,
+    beta_inflation,
+    ABS(beta_growth) as abs_growth_sensitivity,
+    ABS(beta_inflation) as abs_inflation_sensitivity,
+    CASE 
+        WHEN ABS(beta_growth) > ABS(beta_inflation) THEN 'Growth-Dominant'
+        ELSE 'Inflation-Dominant'
+    END as primary_sensitivity,
+    r2_growth_only + r2_inflation_additional as total_r2
+FROM factor_regression
+ORDER BY strategy_name;
+\end{lstlisting}
+
+\subsubsection{Use Case E6: Credit Signal Decay Comparison and Rebalancing Frequency}
+\textbf{Objective:} Analyze signal decay profiles to optimize rebalancing frequencies for different credit signals.
+
+\textbf{Mathematical Framework:}
+Signal decay function:
+\begin{equation}
+\text{IC}(x) = \text{IC}_0 \cdot \exp(-\lambda x)
+\end{equation}
+
+Half-life determination:
+\begin{equation}
+x_{1/2} = \frac{\ln(2)}{\lambda}
+\end{equation}
+
+Optimal rebalancing frequency considers decay and costs:
+\begin{equation}
+f^* = \arg\max_f \left[ \text{IC}(1/f) \cdot \text{SR} - \text{Cost}(f) \right]
+\end{equation}
+
+\textbf{Implementation:}
+\begin{lstlisting}[language=python,caption={Credit Signal Decay Analysis}]
+class CreditSignalDecay:
+    def __init__(self, signals, forward_returns):
+        self.signals = signals
+        self.forward_returns = forward_returns
+        self.decay_profiles = {}
+        
+    def analyze_signal_decay(self, signal_name, max_delay=60):
+        """Analyze decay profile for a specific signal"""
+        signal = self.signals[signal_name]
+        returns = self.forward_returns
+        
+        decay_results = {
+            'delay_days': [],
+            'ic': [],
+            'ic_ratio': [],
+            'sharpe': [],
+            'sharpe_ratio': []
+        }
+        
+        # Baseline (1-day delay)
+        baseline_ic = signal.shift(1).corr(returns)
+        baseline_sharpe = self._calculate_signal_sharpe(
+            signal.shift(1), returns
+        )
+        
+        # Test different delays
+        for delay in range(1, max_delay + 1):
+            delayed_signal = signal.shift(delay)
+            
+            # Information coefficient
+            ic = delayed_signal.corr(returns)
+            
+            # Sharpe ratio of delayed signal
+            sharpe = self._calculate_signal_sharpe(
+                delayed_signal, returns
+            )
+            
+            decay_results['delay_days'].append(delay)
+            decay_results['ic'].append(ic)
+            decay_results['ic_ratio'].append(ic / baseline_ic)
+            decay_results['sharpe'].append(sharpe)
+            decay_results['sharpe_ratio'].append(
+                sharpe / baseline_sharpe if baseline_sharpe != 0 else 0
+            )
+            
+        # Fit exponential decay model
+        decay_df = pd.DataFrame(decay_results)
+        half_life = self._fit_decay_model(decay_df)
+        
+        self.decay_profiles[signal_name] = {
+            'data': decay_df,
+            'half_life': half_life,
+            'baseline_ic': baseline_ic,
+            'baseline_sharpe': baseline_sharpe
+        }
+        
+        return decay_df, half_life
+    
+    def _calculate_signal_sharpe(self, signal, returns):
+        """Calculate Sharpe ratio for a signal-based strategy"""
+        # Simple strategy: long top quintile, short bottom quintile
+        signal_ranks = signal.rank(pct=True)
+        positions = pd.Series(0, index=signal.index)
+        positions[signal_ranks > 0.8] = 1
+        positions[signal_ranks < 0.2] = -1
+        
+        strategy_returns = positions.shift(1) * returns
+        
+        if strategy_returns.std() > 0:
+            sharpe = (
+                strategy_returns.mean() / 
+                strategy_returns.std() * 
+                np.sqrt(252)
+            )
+        else:
+            sharpe = 0
+            
+        return sharpe
+    
+    def _fit_decay_model(self, decay_df):
+        """Fit exponential decay and extract half-life"""
+        # Use IC ratio for fitting
+        y = decay_df['ic_ratio'].values
+        x = decay_df['delay_days'].values
+        
+        # Log transform for linear regression
+        # IC(x) = IC_0 * exp(-lambda * x)
+        # log(IC(x)/IC_0) = -lambda * x
+        
+        mask = y > 0  # Avoid log(0)
+        if mask.sum() < 2:
+            return np.nan
+            
+        log_y = np.log(y[mask])
+        x_fit = x[mask]
+        
+        # Linear regression on log scale
+        slope, intercept = np.polyfit(x_fit, log_y, 1)
+        lambda_decay = -slope
+        
+        # Half-life
+        if lambda_decay > 0:
+            half_life = np.log(2) / lambda_decay
+        else:
+            half_life = np.inf
+            
+        return half_life
+    
+    def recommend_rebalancing_frequency(self, signal_name, 
+                                      transaction_cost=0.001):
+        """Recommend optimal rebalancing based on decay and costs"""
+        profile = self.decay_profiles[signal_name]
+        half_life = profile['half_life']
+        
+        # Rule of thumb: rebalance at 1/3 to 1/2 of half-life
+        if half_life < 5:
+            return 'Daily'
+        elif half_life < 15:
+            return 'Weekly'
+        elif half_life < 45:
+            return 'Monthly'
+        else:
+            return 'Quarterly'
+            
+    def compare_signals(self):
+        """Compare decay profiles across signals"""
+        comparison = pd.DataFrame({
+            signal: {
+                'half_life': profile['half_life'],
+                'baseline_ic': profile['baseline_ic'],
+                'baseline_sharpe': profile['baseline_sharpe'],
+                'recommended_freq': self.recommend_rebalancing_frequency(signal)
+            }
+            for signal, profile in self.decay_profiles.items()
+        }).T
+        
+        return comparison
+\end{lstlisting}
+
+\textbf{Query Implementation:}
+\begin{lstlisting}[language=sql]
+-- Analyze signal decay for different credit signals
+WITH signal_types AS (
+    SELECT 'CDS_Momentum_1M' as signal_name UNION ALL
+    SELECT 'Bond_Value_OAS' UNION ALL
+    SELECT 'Credit_Skew_Signal' UNION ALL
+    SELECT 'Carry_Rolldown'
+),
+decay_analysis AS (
+    SELECT 
+        s.signal_name,
+        d.delay_days,
+        -- Calculate IC for each delay
+        CORR(
+            LAG(signal_value, d.delay_days) OVER (
+                PARTITION BY instrument_id ORDER BY date
+            ),
+            forward_return_1m
+        ) as ic_delayed,
+        -- Baseline IC (1-day delay)
+        CORR(
+            LAG(signal_value, 1) OVER (
+                PARTITION BY instrument_id ORDER BY date
+            ),
+            forward_return_1m
+        ) as ic_baseline
+    FROM signal_data
+    CROSS JOIN LATERAL (
+        SELECT generate_series(1, 60) as delay_days
+    ) d
+    JOIN signal_types s ON signal_data.signal_type = s.signal_name
+    GROUP BY s.signal_name, d.delay_days
+),
+decay_metrics AS (
+    SELECT 
+        signal_name,
+        delay_days,
+        ic_delayed,
+        ic_baseline,
+        ic_delayed / NULLIF(ic_baseline, 0) as ic_ratio,
+        -- Exponential decay fit would be done in application layer
+        -- Here we identify key points
+        CASE 
+            WHEN ic_delayed / NULLIF(ic_baseline, 0) < 0.5 
+            THEN 1 ELSE 0 
+        END as below_half
+    FROM decay_analysis
+),
+half_life_estimation AS (
+    SELECT 
+        signal_name,
+        MIN(delay_days) as estimated_half_life
+    FROM decay_metrics
+    WHERE below_half = 1
+    GROUP BY signal_name
+),
+rebalancing_recommendation AS (
+    SELECT 
+        signal_name,
+        estimated_half_life,
+        CASE 
+            WHEN estimated_half_life < 5 THEN 'Daily'
+            WHEN estimated_half_life < 15 THEN 'Weekly'
+            WHEN estimated_half_life < 45 THEN 'Monthly'
+            ELSE 'Quarterly'
+        END as recommended_frequency,
+        CASE 
+            WHEN estimated_half_life < 5 THEN 252
+            WHEN estimated_half_life < 15 THEN 52
+            WHEN estimated_half_life < 45 THEN 12
+            ELSE 4
+        END as rebalances_per_year
+    FROM half_life_estimation
+)
+SELECT 
+    r.*,
+    -- Estimate turnover cost impact
+    r.rebalances_per_year * 0.001 * 2 as estimated_annual_cost
+FROM rebalancing_recommendation r
+ORDER BY estimated_half_life;
+\end{lstlisting}
+
+\textbf{Summary of Credit Macro Strategies:}
+These use cases extend the macro factor framework to credit markets, providing:
+\begin{itemize}
+    \item \textbf{E2}: Independence vs. performance trade-offs through orthogonalization
+    \item \textbf{E3}: Crisis protection through sentiment-based timing
+    \item \textbf{E4}: Cross-regional spillover analysis for global portfolios
+    \item \textbf{E5}: Macro factor attribution for credit strategies
+    \item \textbf{E6}: Signal decay analysis for optimal execution
+\end{itemize}
+
+Each implementation combines mathematical rigor with practical considerations like transaction costs, regime dependence, and real-world execution constraints.
