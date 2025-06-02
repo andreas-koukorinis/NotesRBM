@@ -1,0 +1,29 @@
+• How do corporate bond spreads for specific sectors and ratings compare to their historical distributions?
+
+• What drives changes in corporate credit curve steepness over time?
+
+• How do spread differentials between investment grade and high yield credits behave during different market cycles?
+
+• To what extent do sovereign yield curves influence corporate credit spreads?
+
+• Can principal component analysis identify mispriced corporate bonds relative to their credit curves?
+
+• How do corporate credit spreads react to macroeconomic data releases and central bank policy changes?
+
+• What is the relationship between credit spread volatility and broader market stress indicators?
+
+• How do corporate bond returns vary with exposure to different macro factors?
+
+• What lead-lag relationships exist between credit spreads and equity market volatility?
+
+• How do seasonal patterns in corporate bond issuance and earnings affect credit spread dynamics?
+
+• Can machine learning techniques improve factor-based attribution of corporate bond performance?
+
+• How do intraday versus overnight return patterns differ for corporate bonds during various market regimes?
+
+• What drives relative value opportunities across different segments of corporate credit curves?
+
+• How do corporate bond spreads respond differently to policy announcements versus actual policy implementation?
+
+• What are the optimal methods for decomposing corporate bond returns into systematic risk factors?
