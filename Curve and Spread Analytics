@@ -1,0 +1,802 @@
+
+\section{}
+
+\usecase{A1: Historical Curve Positioning}{
+Analyzes current spread levels relative to historical percentiles to identify extreme positioning across sectors and ratings. Requires time-series Z-spread data bucketed by sector, rating, and maturity.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT percentile\_rank() OVER (PARTITION BY sector, rating ORDER BY z\_spread) FROM spreads WHERE date BETWEEN current\_date - INTERVAL '5 years' AND current\_date}
+    \item \texttt{SELECT * FROM current\_spreads WHERE z\_spread > (SELECT percentile\_cont(0.9)\\
+    FROM historical\_spreads GROUP BY sector\_rating\_bucket)}
+    \item \texttt{WITH rolling\_stats AS (SELECT sector, AVG(z\_spread) as mean, STDDEV(z\_spread) as std FROM spreads \\ 
+    WHERE date > current\_date - INTERVAL '3 years' GROUP BY sector)}
+    \item \texttt{SELECT bonds WHERE (current\_spread - historical\_mean) / historical\_std > 2.0}
+    \item \texttt{CREATE MATERIALIZED VIEW spread\_percentiles AS SELECT date, sector, rating, z\_spread, PERCENT\_RANK() OVER (PARTITION BY sector ORDER BY z\_spread) as pct\_rank}
+\end{itemize}
+}
+
+\usecase{A2: Curve Slope Comparison vs. History}{
+Calculates yield curve slopes (2y-10y, 5y-30y)\\
+and compares current values to historical distributions for steepener/flattener opportunities.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, (interp\_10y - interp\_2y) as slope\_2s10s FROM curve\_table WHERE maturity IN (2, 10)}
+    \item \texttt{WITH slope\_stats AS (SELECT AVG(slope) as mean\_slope, STDDEV(slope) as std\_slope FROM historical\_slopes)}
+    \item \texttt{SELECT * FROM current\_slopes WHERE ABS(slope - mean\_slope) / std\_slope > 1.5}
+    \item \texttt{SELECT date, CASE WHEN slope > lag(slope) THEN 'steepening' ELSE 'flattening' END as direction}
+    \item \texttt{CREATE INDEX idx\_curve\_slope ON curve\_table(date, maturity) INCLUDE (interpolated\_yield)}
+\end{itemize}
+}
+
+\usecase{A3: IG vs HY Compression/Decompression}{
+Monitors spread differentials between investment grade and high yield bonds to identify compression/decompression cycles.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, AVG(CASE WHEN rating IN ('AAA','AA','A','BBB') THEN spread END) as ig\_avg, AVG(CASE WHEN rating IN ('BB','B','CCC') \\
+    THEN spread END) as hy\_avg}
+    \item \texttt{WITH spread\_diff AS (SELECT date, (hy\_avg - ig\_avg) as differential FROM daily\_spreads)}
+    \item \texttt{SELECT * FROM spread\_diff \
+    \WHERE differential < (SELECT percentile\_cont(0.1) \\
+    FROM spread\_diff)}
+    \item \texttt{SELECT date, differential, ROW\_NUMBER() OVER (ORDER BY differential ASC) as compression\_rank}
+    \item \texttt{CREATE SIGNAL AS SELECT WHEN differential\_zscore < -1.5 THEN 'long\_hy\_short\_ig'}
+\end{itemize}
+}
+
+\usecase{A4: Country vs Corporate Spread Influence}{
+Analyzes co-movements between sovereign yields and corporate spreads using regression analysis and PCA.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT corr(sovereign\_yield\_change, corp\_spread\_change) OVER (ORDER BY date ROWS 60 PRECEDING) as rolling\_corr}
+    \item \texttt{WITH beta\_calc AS (SELECT regr\_slope(corp\_spread, sovereign\_yield) as beta FROM joined\_data GROUP BY sector)}
+    \item \texttt{SELECT * FROM pca\_results WHERE component\_1\_loading > 0.7 AND variance\_explained > 0.3}
+    \item \texttt{JOIN country\_curve cc ON cc.date = cs.date WHERE cc.country = cs.issuer\_country}
+    \item \texttt{SELECT sector, AVG(beta) as avg\_beta, STDDEV(residual) as idiosyncratic\_risk FROM regression\_results}
+\end{itemize}
+}
+
+\usecase{A5: PCA-Implied Fair Value vs. Actual Yield}{
+Uses principal component analysis on yield curves to identify rich/cheap bonds based on residuals from fair value.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{WITH pca\_model AS (SELECT pca\_transform(ARRAY[yield\_5y, yield\_10y, yield\_30y]) as components)}
+    \item \texttt{SELECT bond\_id, actual\_yield - pca\_reconstructed\_yield as residual FROM pca\_results}
+    \item \texttt{SELECT * FROM residuals WHERE ABS(residual) / residual\_std > 1.5 ORDER BY residual DESC}
+    \item \texttt{CREATE TABLE pca\_signals AS SELECT bond\_id, CASE WHEN residual > 1.5*std THEN 'rich' ELSE 'cheap' END}
+    \item \texttt{SELECT date, COUNT(*) as outlier\_count FROM pca\_residuals WHERE ABS(z\_score) > 2 GROUP BY date}
+\end{itemize}
+}
+
+\usecase{A6: Attribution Across Trend/Carry/Value}{
+Decomposes portfolio returns into factor contributions (trend, carry, value) for performance attribution.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT strategy\_id, SUM(CASE WHEN factor='trend' THEN pnl END) as trend\_pnl FROM factor\_attribution}
+    \item \texttt{WITH normalized AS (SELECT factor\_type, pnl/volatility as risk\_adjusted\_pnl FROM attribution)}
+    \item \texttt{SELECT date, factor, pnl, SUM(pnl) OVER (PARTITION BY factor ORDER BY date) as cumulative\_pnl}
+    \item \texttt{CREATE VIEW attribution\_summary AS SELECT factor, AVG(daily\_pnl) as avg\_contribution, STDDEV(daily\_pnl)}
+    \item \texttt{SELECT ROW\_NUMBER() OVER (PARTITION BY date ORDER BY abs(pnl) DESC) as pnl\_rank FROM factors}
+\end{itemize}
+}
+
+\usecase{A7: Term Structure Dislocation via PCA}{
+Applies PCA at the curve segment level to identify relative value opportunities across maturity buckets.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT curve\_segment, pca\_residual FROM curve\_pca WHERE maturity\_bucket IN ('2-5y', '5-10y', '10-30y')}
+    \item \texttt{WITH segment\_scores AS (SELECT segment, residual/historical\_std as z\_score FROM pca\_decomposition)}
+    \item \texttt{SELECT * FROM segment\_scores WHERE z\_score NOT BETWEEN -1.5 AND 1.5 ORDER BY ABS(z\_score) DESC}
+    \item \texttt{CREATE MATERIALIZED VIEW curve\_richness AS SELECT date, segment, percentile\_rank() OVER (ORDER BY residual)}
+    \item \texttt{SELECT s1.segment, s2.segment, (s1.z\_score - s2.z\_score) as relative\_value FROM segments s1 CROSS JOIN segments s2}
+\end{itemize}
+}
+
+\usecase{A9: Macro Factor Sensitivity}{
+Measures rolling sensitivities of spreads to macro factors (oil, volatility, FX) using regression analysis or an ML model.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, regr\_slope(spread\_change, oil\_return) OVER (ORDER BY date ROWS 60 PRECEDING) as oil\_beta}
+    \item \texttt{WITH factor\_betas AS (SELECT bond\_id, regr\_r2(spread, macro\_factor) as r\_squared FROM joined\_data)}
+    \item \texttt{CREATE TABLE rolling\_sensitivities AS SELECT date, factor, beta, t\_stat FROM rolling\_regression}
+    \item \texttt{SELECT * FROM sensitivities WHERE ABS(t\_stat) > 2 AND date = current\_date}
+    \item \texttt{SELECT factor, AVG(ABS(beta)) as avg\_sensitivity, COUNT(*) as significant\_periods FROM betas WHERE p\_value < 0.05}
+\end{itemize}
+}
+
+\usecase{A10: Spread Reaction to Volatility Spikes}{
+Analyzes spread behavior in pre/post windows around volatility spike events for mean reversion strategies.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT event\_id, AVG(spread\_return) as pre\_event FROM spreads WHERE delta\_hours BETWEEN -24 AND 0}
+    \item \texttt{WITH spike\_windows AS (SELECT event\_date, spread\_before, spread\_after, (spread\_after - spread\_before) as reaction)}
+    \item \texttt{SELECT percentile\_cont(0.9) WITHIN GROUP (ORDER BY abs(reaction)) as extreme\_reaction FROM spike\_windows}
+    \item \texttt{JOIN vol\_spike\_events vse ON s.date BETWEEN vse.event\_date - INTERVAL '1 day' AND vse.event\_date + INTERVAL '3 days'}
+    \item \texttt{CREATE SIGNAL AS SELECT CASE WHEN vol\_spike > 2*avg\_vol AND spread\_widening > 10bp THEN 'mean\_revert'}
+\end{itemize}
+}
+
+\usecase{A12: Market Sensitivity to CPI Events}{
+Quantifies market reactions to CPI releases across different time windows for risk management.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT event\_id, STDDEV(return) as realized\_vol FROM returns WHERE event\_type = 'CPI' AND delta\_hours BETWEEN -2 AND 2}
+    \item \texttt{WITH event\_vol AS (SELECT date, MAX(ABS(return)) as max\_move FROM cpi\_windows GROUP BY date)}
+    \item \texttt{SELECT percentile\_rank() OVER (ORDER BY realized\_vol) as vol\_percentile FROM event\_volatilities}
+    \item \texttt{CREATE VIEW cpi\_impact AS SELECT asset\_class, AVG(post\_cpi\_vol) / AVG(normal\_vol) as vol\_multiple}
+    \item \texttt{SELECT * FROM historical\_cpi WHERE surprise > 0.2 AND market\_reaction > 2 * avg\_daily\_move}
+\end{itemize}
+}
+
+\usecase{A13: ML-Based Factor Rotation Analysis}{
+Uses machine learning models to predict factor performance and optimize rotation timing across regimes.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT factor\_id, prediction\_score, realized\_sharpe FROM ml\_predictions WHERE model = 'XGBoost'}
+    \item \texttt{WITH feature\_importance AS (SELECT feature, shap\_value, ROW\_NUMBER() OVER (ORDER BY shap\_value DESC) as rank)}
+    \item \texttt{SELECT signal\_cluster, AVG(accuracy) as cluster\_accuracy FROM ensemble\_results GROUP BY signal\_cluster}
+    \item \texttt{CREATE TABLE factor\_weights AS SELECT date, factor, CASE WHEN predicted\_rank <= 3 THEN weight * 1.5 ELSE weight * 0.5 END}
+    \item \texttt{SELECT date, SUM(factor\_weight * factor\_return) as strategy\_return FROM weighted\_factors}
+\end{itemize}
+}
+
+\usecase{A14: Intraday Curve Decomposition}{
+Separates overnight and intraday return components for enhanced signal processing by time period.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, (close\_price - open\_price)/open\_price as intraday\_return, (open\_price - lag(close\_price))/lag(close\_price) as overnight\_return}
+    \item \texttt{WITH time\_buckets AS (SELECT hour, AVG(return) as avg\_return, STDDEV(return) as vol FROM intraday GROUP BY hour)}
+    \item \texttt{SELECT * FROM decomposed\_returns WHERE ABS(overnight\_return) > 2 * ABS(intraday\_return)}
+    \item \texttt{CREATE MATERIALIZED VIEW return\_attribution AS SELECT date, overnight\_contribution, intraday\_contribution}
+    \item \texttt{SELECT time\_bucket, sharpe\_ratio FROM performance\_by\_timeperiod ORDER BY sharpe\_ratio DESC}
+\end{itemize}
+}
+
+\usecase{A15: Intraday Curve Slope Reversal Detection}{
+Identifies intraday patterns in yield curve slopes using triplet logic to capture steepening/flattening reversals.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT timestamp, slope\_5s30s, LAG(slope\_5s30s, 12) OVER (ORDER BY timestamp) as past\_slope, LEAD(slope\_5s30s, 12) as future\_slope}
+    \item \texttt{WITH reversal\_points AS (SELECT time WHERE sign(slope\_change\_morning) != sign(slope\_change\_afternoon))}
+    \item \texttt{SELECT hour, COUNT(*) as reversal\_frequency FROM reversals WHERE time = '10:00 CET' GROUP BY hour}
+    \item \texttt{CREATE SIGNAL AS SELECT WHEN slope\_acceleration < 0 AND time > '10:00' THEN 'fade\_steepening'}
+    \item \texttt{SELECT curve, AVG(post\_reversal\_return) as edge FROM triplet\_signals WHERE reversal\_confidence > 0.7}
+\end{itemize}
+}
+
+\usecase{A16: Curves 5s30s vs 10s30s Box Distortion Diagnostics}{
+Compares curve shape boxes across bonds to identify relative value dislocations.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, (fra\_5s30s - fra\_10s30s) - (dbr\_5s30s - dbr\_10s30s) as box\_spread}
+    \item \texttt{WITH historical\_boxes AS (SELECT country\_pair, percentile\_cont(0.95) as extreme\_level FROM box\_spreads)}
+    \item \texttt{SELECT * FROM current\_boxes WHERE ABS(box\_distortion) > historical\_95th\_percentile}
+    \item \texttt{CREATE VIEW relative\_curve\_value AS SELECT date, MAX(box\_spread) - MIN(box\_spread) as dispersion}
+    \item \texttt{SELECT country1, country2, z\_score FROM box\_metrics WHERE ABS(z\_score) > 2 ORDER BY z\_score}
+\end{itemize}
+}
+
+\usecase{A17: PCA Residual-Based Curve Compression Trades}{
+Generates curve compression/decompression signals using PCA residuals on key maturity points.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{WITH curve\_pca AS (SELECT pca\_fit(ARRAY[yield\_5y, yield\_10y, yield\_30y]) as model FROM curves)}
+    \item \texttt{SELECT maturity, actual - pca\_fitted as residual, residual/residual\_std as z\_score}
+    \item \texttt{SELECT * FROM curve\_segments WHERE residual\_rank BETWEEN 1 AND 10 OR residual\_rank BETWEEN 90 AND 100}
+    \item \texttt{CREATE TABLE compression\_signals AS SELECT date, CASE WHEN butterfly\_residual < -1.5 THEN 'compression\_trade'}
+    \item \texttt{SELECT segment\_pair, AVG(convergence\_pnl) as historical\_edge FROM pca\_trades GROUP BY segment\_pair}
+\end{itemize}
+}
+
+\usecase{A18: Evaluate Specific Events on Effects on Specific Segments}{
+Measures the impact of event risk (M\&A, LBO, Fed purchase programs, ETF rebalancings) on specific curve segments using DV01-weighted flow analysis.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, SUM(pepp\_flow * dv01) as weighted\_flow, curve\_segment FROM ecb\_purchases GROUP BY date, segment}
+    \item \texttt{WITH event\_windows AS (SELECT meeting\_date, AVG(oat\_10y) as pre\_meeting, AVG(oat\_10y) as post\_meeting)}
+    \item \texttt{SELECT segment, regr\_slope(yield\_change, pepp\_flow\_change) as flow\_sensitivity FROM flow\_impact}
+    \item \texttt{CREATE VIEW pepp\_effectiveness AS SELECT maturity, (yield\_before - yield\_after) / total\_purchases as impact\_per\_billion}
+    \item \texttt{SELECT * FROM curve\_response WHERE policy\_meeting = true AND segment\_reaction > 2 * average\_daily\_move}
+\end{itemize}
+}
+
+\section{Cross-Asset and Macro Sensitivity}
+
+\usecase{A19: Intraday Macro Shock Propagation via FX/Equity and Credit}{
+Tracks minute-by-minute propagation of macro surprises through FX/Equity and credit markets for timing strategies.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT surprise\_time, asset, first\_value(price) - price as cumulative\_move FROM macro\_reactions WHERE minutes\_after BETWEEN 0 AND 60}
+    \item \texttt{WITH propagation AS (SELECT asset, MIN(time) as first\_reaction FROM price\_moves WHERE abs(move) > threshold)}
+    \item \texttt{SELECT corr(usd\_jpy\_1min\_return, payroll\_surprise) OVER (ORDER BY time ROWS 60 PRECEDING)}
+    \item \texttt{CREATE TABLE shock\_sequence AS SELECT event, asset\_class, lag\_minutes, peak\_impact FROM propagation\_analysis}
+    \item \texttt{SELECT asset1, asset2, optimal\_lag FROM cross\_asset\_leads WHERE correlation > 0.7 ORDER BY correlation DESC}
+\end{itemize}
+}
+
+\usecase{A20: Volatility Surface Sentiment Regression to Credit Spread Direction}{
+Constructs credit spread directional signals from options market skew and volatility surface dynamics.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, (call\_iv\_25d - put\_iv\_25d) as risk\_reversal, (butterfly\_25d) as convexity FROM equity\_options}
+    \item \texttt{WITH skew\_signal AS (SELECT date, CASE WHEN rr\_zscore < -2 THEN 'short' WHEN rr\_zscore > 2 THEN 'long' END)}
+    \item \texttt{SELECT regr\_slope(fx\_return, skew\_change) as skew\_beta FROM surface\_dynamics WHERE tenor = '1M'}
+    \item \texttt{CREATE SIGNAL AS SELECT pair, direction FROM vol\_sentiment WHERE skew\_percentile > 90 AND term\_structure = 'inverted'}
+    \item \texttt{SELECT currency, AVG(post\_signal\_return) as signal\_efficacy FROM historical\_skew\_trades GROUP BY currency}
+\end{itemize}
+}
+
+\usecase{A21: Nowcasting-Based Factor Exposure Timing}{
+Dynamically adjusts factor exposures based on real-time nowcasted economic indicators.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT region, growth\_zscore, inflation\_zscore FROM nowcast\_data WHERE zscore\_update = current\_date}
+    \item \texttt{WITH regime AS (SELECT CASE WHEN growth\_z > 2 AND inflation\_z < 0 THEN 'goldilocks' ELSE 'stagflation' END)}
+    \item \texttt{SELECT factor, optimal\_weight FROM regime\_weights WHERE nowcast\_regime = current\_regime}
+    \item \texttt{CREATE VIEW dynamic\_allocation AS SELECT asset\_class, base\_weight * (1 + 0.5 * growth\_zscore) as adjusted\_weight}
+    \item \texttt{SELECT date, SUM(factor\_exposure * factor\_return) as nowcast\_enhanced\_return FROM timed\_portfolio}
+\end{itemize}
+}
+
+\section{Event Clock and Time-Aligned Signals}
+
+\usecase{A22: Reversal/Momentum Profiles by Hour for FX/Equities}{
+Classifies intraday patterns to identify time-dependent momentum and mean reversion windows.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT hour, AVG(autocorrelation\_30min) as momentum\_score FROM intraday\_returns GROUP BY hour}
+    \item \texttt{WITH time\_regimes AS (SELECT time\_bucket, CASE WHEN serial\_corr > 0.3 THEN 'momentum' ELSE 'reversion' END)}
+    \item \texttt{SELECT hour, win\_rate FROM strategy\_performance WHERE strategy = 'momentum' AND hour BETWEEN 14 AND 16}
+    \item \texttt{CREATE TABLE optimal\_times AS SELECT asset, hour, strategy\_type, sharpe FROM backtests WHERE sharpe > 1.5}
+    \item \texttt{SELECT time\_window, (momentum\_sharpe - reversion\_sharpe) as regime\_clarity FROM time\_analysis}
+\end{itemize}
+}
+
+\usecase{A23: Volume-Adjusted Time Regime Switching}{
+Redefines time periods based on cumulative volume to identify consistent trading regimes.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT timestamp, SUM(volume) OVER (ORDER BY timestamp) as cumulative\_volume, NTILE(10) OVER (ORDER BY cum\_vol) as volume\_decile}
+    \item \texttt{WITH volume\_clock AS (SELECT volume\_bucket, AVG(return) as avg\_return, STDDEV(return) as volatility)}
+    \item \texttt{SELECT * FROM regime\_transitions WHERE volume\_regime\_change = true AND price\_behavior\_shift > threshold}
+    \item \texttt{CREATE VIEW volume\_aligned\_performance AS SELECT strategy, volume\_decile, sharpe FROM results GROUP BY 1,2}
+    \item \texttt{SELECT optimal\_volume\_bucket FROM backtests WHERE consistency\_score > 0.8 ORDER BY sharpe DESC}
+\end{itemize}
+}
+
+\usecase{A24: Event-Clock Conditioning by Macro News Windows}{
+Aligns performance metrics around specific macro events to optimize entry/exit timing.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT event\_type, hours\_from\_event, AVG(abs(return)) as avg\_move FROM event\_aligned\_returns}
+    \item \texttt{WITH post\_ecb AS (SELECT * FROM returns WHERE timestamp BETWEEN ecb\_time AND ecb\_time + INTERVAL '2 hours')}
+    \item \texttt{SELECT event, optimal\_entry\_lag, optimal\_exit\_lag FROM event\_window\_optimization WHERE sharpe > 2}
+    \item \texttt{CREATE TABLE event\_signals AS SELECT event\_id, CASE WHEN pre\_event\_vol < post\_event\_vol THEN 'fade' ELSE 'follow'}
+    \item \texttt{SELECT strategy, event\_type, SUM(pnl) as total\_pnl FROM event\_conditioned\_trades GROUP BY strategy, event\_type}
+\end{itemize}
+}
+
+\section{Equity \& Quantitative Strategy Use Cases}
+
+\usecase{B1: Spread Curve Dynamics vs Forecast}{
+Compares realized curve movements against macro forecasts to generate forecast-error trades.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, realized\_2s10s - forecast\_2s10s as forecast\_error FROM curve\_vs\_forecast}
+    \item \texttt{WITH error\_persistence AS (SELECT date, forecast\_error, LAG(forecast\_error, 5) OVER (ORDER BY date) as lagged\_error)}
+    \item \texttt{SELECT * FROM forecast\_errors WHERE ABS(error) > 2 * historical\_mae AND error\_direction = consistent\_3\_days}
+    \item \texttt{CREATE SIGNAL AS SELECT WHEN forecast\_error > 15bp AND fed\_path = 'hawkish' THEN 'steepener'}
+    \item \texttt{SELECT forecast\_vintage, MAE, hit\_rate FROM forecast\_accuracy WHERE curve\_point = '2s10s' ORDER BY date}
+\end{itemize}
+}
+
+\usecase{B2: Relative Value under Fed Policy}{
+Analyzes curve behavior around FOMC meetings to identify policy-driven relative value opportunities.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT meeting\_date, curve\_slope\_before, curve\_slope\_after, (slope\_after - slope\_before) as slope\_change}
+    \item \texttt{WITH policy\_impact AS (SELECT policy\_action, AVG(slope\_change) as avg\_impact FROM fomc\_events GROUP BY action)}
+    \item \texttt{SELECT * FROM post\_fomc WHERE slope\_reaction > 2 * std\_deviation AND time\_since\_meeting < '1 day'}
+    \item \texttt{CREATE TABLE policy\_anomalies AS SELECT date, curve\_point WHERE reaction OPPOSITE OF historical\_pattern}
+    \item \texttt{SELECT curve\_segment, win\_rate FROM policy\_trades WHERE entry = 'post\_fomc' GROUP BY curve\_segment}
+\end{itemize}
+}
+
+\usecase{B3: Market-Implied vs Survey Inflation}{
+Identifies divergences between market-based and survey-based inflation expectations for trading opportunities.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, tips\_5y5y - michigan\_5y as expectation\_gap FROM inflation\_measures}
+    \item \texttt{WITH gap\_zscore AS (SELECT date, (gap - avg\_gap) / std\_gap as zscore FROM inflation\_divergence)}
+    \item \texttt{SELECT * FROM divergence\_signals WHERE ABS(zscore) > 2 AND persistence > 5\_days}
+    \item \texttt{CREATE VIEW inflation\_mispricing AS SELECT date, market\_implied, survey, convergence\_probability}
+    \item \texttt{SELECT entry\_date, exit\_date, cumulative\_pnl FROM inflation\_convergence\_trades WHERE zscore > 2.5}
+\end{itemize}
+}
+
+\usecase{B4: Seasonality Deviation Analysis}{
+Detects when current spreads deviate significantly from seasonal patterns for calendar-based strategies.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT month, AVG(spread) as seasonal\_avg, STDDEV(spread) as seasonal\_std FROM ten\_year\_history GROUP BY month}
+    \item \texttt{WITH current\_deviation AS (SELECT sector, (current\_spread - seasonal\_avg) / seasonal\_std as zscore)}
+    \item \texttt{SELECT * FROM seasonal\_outliers WHERE ABS(deviation\_zscore) > 2 AND month = EXTRACT(month FROM current\_date)}
+    \item \texttt{CREATE SIGNAL AS SELECT sector, 'mean\_revert' as action WHERE seasonal\_zscore NOT BETWEEN -2 AND 2}
+    \item \texttt{SELECT month, sector, AVG(reversion\_pnl) as historical\_edge FROM seasonal\_trades GROUP BY month, sector}
+\end{itemize}
+}
+
+\usecase{B5: Volatility Term Structure Repricing}{
+Analyzes changes in the volatility term structure around events to generate vol trading signals.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT tenor, implied\_vol, (iv\_30d - iv\_10d) as term\_slope FROM vol\_surface WHERE underlying = 'SPX'}
+    \item \texttt{WITH pre\_event AS (SELECT avg(term\_slope) FROM vol WHERE time < event - INTERVAL '1 day')}
+    \item \texttt{SELECT event, tenor, MAX(vol\_change) as peak\_repricing FROM event\_vol\_dynamics GROUP BY event, tenor}
+    \item \texttt{CREATE TABLE vol\_signals AS SELECT WHEN term\_structure = 'inverted' AND event\_tomorrow THEN 'buy\_gamma'}
+    \item \texttt{SELECT strategy, event\_type, AVG(vol\_pnl) as avg\_pnl FROM term\_structure\_trades GROUP BY strategy, event}
+\end{itemize}
+}
+
+\usecase{C1: Factor Rotation}{
+Optimizes factor allocation based on momentum, valuation, and statistical measures of factor performance.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT factor, sharpe\_ratio, RANK() OVER (ORDER BY sharpe\_60d DESC) as momentum\_rank FROM factor\_returns}
+    \item \texttt{WITH rolling\_stats AS (SELECT factor, AVG(daily\_return) / STDDEV(daily\_return) * SQRT(252) as sharpe)}
+    \item \texttt{SELECT f1.factor, f2.sector, correlation FROM factor\_sector\_exposure f1 JOIN sector\_returns f2}
+    \item \texttt{CREATE VIEW factor\_allocation AS SELECT factor, CASE WHEN t\_stat > 2 AND rank <= 3 THEN 0.3 ELSE 0.1 END}
+    \item \texttt{SELECT date, SUM(factor\_weight * factor\_return) as portfolio\_return FROM optimized\_weights}
+\end{itemize}
+}
+
+\usecase{C2: Strategy Performance vs Backtest}{
+Monitors live trading performance against backtested expectations to detect strategy degradation.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT strategy, period, live\_sharpe, backtest\_sharpe, (live - backtest) / backtest as degradation}
+    \item \texttt{WITH drawdown AS (SELECT date, (cumulative\_return - running\_max) / running\_max as dd FROM live\_pnl)}
+    \item \texttt{SELECT * FROM performance\_alerts WHERE live\_sharpe < 0.7 * backtest\_sharpe OR max\_dd > 1.5 * expected\_dd}
+    \item \texttt{CREATE VIEW cone\_chart\_data AS SELECT date, percentile\_5, percentile\_50, percentile\_95, actual\_return}
+    \item \texttt{SELECT strategy, degradation\_score, recommendation FROM strategy\_health WHERE score < threshold}
+\end{itemize}
+}
+
+\usecase{C3: Portfolio Attribution}{
+Breaks down portfolio performance by asset, strategy, and risk factor contributions.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT asset\_class, SUM(position * return) as class\_pnl, SUM(class\_pnl) OVER () as total\_pnl}
+    \item \texttt{WITH top\_contributors AS (SELECT asset, pnl, ROW\_NUMBER() OVER (ORDER BY ABS(pnl) DESC) as rank)}
+    \item \texttt{SELECT date, asset, pnl, SUM(pnl) OVER (PARTITION BY asset ORDER BY date) as cumulative\_contribution}
+    \item \texttt{CREATE VIEW attribution\_summary AS SELECT source, sum(pnl) as total, avg(pnl) as daily\_avg, count(*) as days}
+    \item \texttt{SELECT cluster, MAX(drawdown) as worst\_dd, recovery\_days FROM component\_analysis GROUP BY cluster}
+\end{itemize}
+}
+
+\usecase{C4: ML Strategy Component Attribution}{
+Uses SHAP values and feature importance to attribute ML model predictions to specific features.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT feature\_cluster, AVG(shap\_value) as avg\_impact, SUM(ABS(shap\_value)) as total\_importance}
+    \item \texttt{WITH feature\_pnl AS (SELECT feature, SUM(shap\_value * realized\_return) as attributed\_pnl)}
+    \item \texttt{SELECT model\_version, feature\_set, validation\_score, live\_score FROM model\_performance}
+    \item \texttt{CREATE TABLE feature\_weights AS SELECT date, feature, CASE WHEN importance\_rank <= 10 THEN weight ELSE 0 END}
+    \item \texttt{SELECT cluster, stability\_score FROM feature\_stability WHERE lookback = 60 ORDER BY stability DESC}
+\end{itemize}
+}
+
+\usecase{C5: Conditional Factor Performance}{
+Analyzes factor performance conditional on market regimes (VIX levels, volatility states).
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT vix\_bucket, factor, AVG(return) as avg\_return, COUNT(*) as observations FROM factor\_returns GROUP BY 1,2}
+    \item \texttt{WITH regime\_performance AS (SELECT factor, CASE WHEN vix > 25 THEN return END as high\_vol\_return)}
+    \item \texttt{SELECT factor, regime, sharpe\_ratio FROM conditional\_sharpe WHERE regime IN ('low\_vol', 'high\_vol', 'transition')}
+    \item \texttt{CREATE SIGNAL AS SELECT factor, CASE WHEN vix > 25 AND factor = 'low\_vol' THEN 0 ELSE base\_weight END}
+    \item \texttt{SELECT * FROM regime\_transitions WHERE factor\_efficacy\_change > 0.5 ORDER BY date DESC}
+\end{itemize}
+}
+
+\usecase{C6: Triplet-Based Signal Construction for Equity Momentum}{
+Constructs momentum signals using past-vantage-future triplet patterns in intraday data.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT time, price, LAG(price, 20) OVER (ORDER BY time) as past, LEAD(price, 20) as target}
+    \item \texttt{WITH triplet\_features AS (SELECT (vantage - past)/past as momentum, (target - vantage)/vantage as forward\_ret)}
+    \item \texttt{SELECT time\_of\_day, correlation(momentum, forward\_return) as predictive\_power FROM triplets GROUP BY hour}
+    \item \texttt{CREATE MODEL momentum\_triplet AS SELECT WHEN morning\_momentum > 0.02 AND hour < 14 THEN 'continue\_long'}
+    \item \texttt{SELECT pattern\_id, hit\_rate, avg\_return FROM triplet\_patterns WHERE occurrence > 100 ORDER BY sharpe DESC}
+\end{itemize}
+}
+
+\usecase{C7: Signal Decay Tracking in EU/US Equity Indices}{
+Monitors degradation of signal effectiveness over time to optimize model retraining schedules.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT signal\_date, correlation(signal, forward\_return) OVER (ORDER BY date ROWS 252 PRECEDING) as ic}
+    \item \texttt{WITH decay\_rate AS (SELECT index, signal, -1 * regr\_slope(ic, days\_since\_training) as decay)}
+    \item \texttt{SELECT * FROM signal\_health WHERE current\_ic < 0.5 * initial\_ic OR months\_since\_training > 6}
+    \item \texttt{CREATE VIEW signal\_lifecycle AS SELECT signal, avg\_ic\_at\_3m, avg\_ic\_at\_6m, half\_life\_days}
+    \item \texttt{SELECT index, year, AVG(signal\_strength) as efficacy FROM historical\_decay WHERE index IN ('DAX', 'EUROSTOXX')}
+\end{itemize}
+}
+
+\usecase{C8: Learning Curve Stability Tests by Market and Signal Type}{
+Evaluates model convergence and stability through repeated train/test splits across different sample sizes.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT training\_days, AVG(test\_sharpe) as avg\_sharpe, STDDEV(test\_sharpe) as stability FROM cv\_results GROUP BY training\_days}
+    \item \texttt{WITH convergence AS (SELECT market, MIN(training\_days) as min\_days WHERE sharpe\_std < 0.1)}
+    \item \texttt{SELECT signal\_type, market, correlation(train\_score, test\_score) as generalization FROM splits}
+    \item \texttt{CREATE TABLE optimal\_windows AS SELECT market, signal, training\_days WHERE stability\_score > 0.8}
+    \item \texttt{SELECT * FROM learning\_curves WHERE market = 'EUR/USD' AND marginal\_improvement < 0.01}
+\end{itemize}
+}
+
+\section{Cross-Asset and Multi-Asset Strategies}
+
+\usecase{D1: Cross-Asset Strategy Correlation}{
+Monitors correlations between different strategy types to optimize portfolio diversification.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, corr(cat\_pnl, bcom\_pnl) OVER (ORDER BY date ROWS 60 PRECEDING) as rolling\_corr}
+    \item \texttt{WITH correlation\_matrix AS (SELECT strategy1, strategy2, correlation FROM daily\_returns)}
+    \item \texttt{SELECT * FROM correlation\_alerts WHERE correlation > 0.9 AND lookback\_days = 60}
+    \item \texttt{CREATE VIEW diversification\_score AS SELECT date, 1 - AVG(ABS(correlation)) as score}
+    \item \texttt{SELECT s1.name, s2.name FROM strategies s1, s2 WHERE get\_correlation(s1.returns, s2.returns) > percentile\_90}
+\end{itemize}
+}
+
+\usecase{D2: TAA Active Return Efficacy}{
+Tracks tactical asset allocation decisions against strategic benchmarks to measure value-add.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, SUM((actual\_weight - benchmark\_weight) * asset\_return) as active\_return}
+    \item \texttt{WITH tracking AS (SELECT date, SQRT(AVG(POWER(active\_return, 2))) as tracking\_error)}
+    \item \texttt{SELECT asset, overweight\_periods, AVG(contribution) as avg\_active\_return FROM taa\_decisions}
+    \item \texttt{CREATE SCORECARD AS SELECT model, information\_ratio, hit\_rate, avg\_active\_return FROM taa\_models}
+    \item \texttt{SELECT quarter, SUM(CASE WHEN active\_return > 0 THEN 1 ELSE 0 END) / COUNT(*) as success\_rate}
+\end{itemize}
+}
+
+\usecase{D3: Inter-Asset Ratio Z-score}{
+Monitors relative valuations between asset pairs for mean reversion opportunities.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, spx\_price / gold\_price as ratio, AVG(ratio) OVER (ORDER BY date ROWS 252 PRECEDING) as ma\_252}
+    \item \texttt{WITH ratio\_stats AS (SELECT (ratio - mean) / std as zscore FROM rolling\_stats)}
+    \item \texttt{SELECT * FROM ratio\_extremes WHERE ABS(zscore) > 2 ORDER BY ABS(zscore) DESC}
+    \item \texttt{CREATE SIGNAL AS SELECT WHEN zscore > 2 THEN 'short\_spx\_long\_gold' WHEN zscore < -2 THEN 'long\_spx\_short\_gold'}
+    \item \texttt{SELECT pair, entry\_zscore, exit\_zscore, holding\_period, total\_return FROM historical\_ratio\_trades}
+\end{itemize}
+}
+
+\usecase{D4: Credit vs Equity Vol Lead/Lag}{
+Identifies lead-lag relationships between credit spreads and equity volatility for cross-asset signals.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT lag, corr(hy\_oas, vix\_lagged) as correlation FROM cross\_correlations WHERE lag BETWEEN 0 AND 10}
+    \item \texttt{WITH optimal\_lag AS (SELECT lag FROM correlations ORDER BY correlation DESC LIMIT 1)}
+    \item \texttt{SELECT date, hy\_spread, predicted\_vix FROM lag\_model WHERE hy\_change > 20bp}
+    \item \texttt{CREATE EARLY\_WARNING AS SELECT date WHEN hy\_widening > threshold AND vix < 20 THEN 'vix\_spike\_likely'}
+    \item \texttt{SELECT signal\_date, vix\_before, vix\_after, hit\_rate FROM credit\_leading\_signals WHERE lead\_days = 3}
+\end{itemize}
+}
+
+\usecase{D5: Intraday Strategy Regime Sensitivity}{
+Evaluates strategy performance across different market sentiment regimes for dynamic risk management.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT regime, strategy, AVG(return) as avg\_ret, STDDEV(return) as vol FROM returns WHERE gsi < 35 GROUP BY 1,2}
+    \item \texttt{WITH regime\_sharpe AS (SELECT strategy, regime, return/vol * SQRT(252) as sharpe FROM regime\_performance)}
+    \item \texttt{SELECT * FROM strategy\_regimes WHERE low\_gsi\_sharpe < -0.5 AND normal\_gsi\_sharpe > 1}
+    \item \texttt{CREATE REGIME\_FILTER AS SELECT strategy, CASE WHEN gsi < 35 THEN 0 ELSE base\_weight END as weight}
+    \item \texttt{SELECT regime\_transition, AVG(strategy\_degradation) as avg\_impact FROM regime\_changes GROUP BY transition}
+\end{itemize}
+}
+
+\usecase{D6: Inter-day Macro Sentiment Alignment for CTA Basket}{
+Adjusts CTA weights based on macro surprise indices to enhance trend-following strategies.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, macro\_surprise\_index, cta\_performance, CASE WHEN surprise < -0.5 THEN 'negative' ELSE 'positive' END}
+    \item \texttt{WITH conditional\_performance AS (SELECT macro\_state, AVG(cta\_return) as avg\_return GROUP BY macro\_state)}
+    \item \texttt{SELECT signal, base\_weight * (1 + 0.3 * macro\_alignment\_score) as adjusted\_weight}
+    \item \texttt{CREATE OVERLAY AS SELECT date, CASE WHEN macro\_momentum < 0 THEN cta\_weight * 0.5 ELSE cta\_weight END}
+    \item \texttt{SELECT macro\_regime, trend\_type, enhancement\_ratio FROM cta\_macro\_combination WHERE ratio > 1.2}
+\end{itemize}
+}
+
+\usecase{D7: Stagflation Quadrant Response of Commodities vs Bonds}{
+Analyzes asset performance across growth/inflation quadrants for regime-based allocation.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT quadrant, asset\_class, AVG(quarterly\_return) as avg\_return FROM regime\_returns GROUP BY quadrant, asset}
+    \item \texttt{WITH regime\_definition AS (SELECT date, CASE WHEN growth > 0 AND inflation > 0 THEN 'G+I+' ... END as regime)}
+    \item \texttt{SELECT * FROM quadrant\_performance WHERE regime = 'G-I+' AND asset IN ('Gold', 'TIPS', 'Commodities')}
+    \item \texttt{CREATE ALLOCATION AS SELECT regime, optimal\_weights FROM regime\_optimization WHERE sharpe > benchmark}
+    \item \texttt{SELECT transition, asset, avg(return\_60d\_post) as post\_transition\_performance FROM regime\_changes}
+\end{itemize}
+}
+
+\usecase{D8: FX Macro Signal Orthogonalisation Against Trend/Carry}{
+Isolates pure macro alpha by removing trend and carry components from FX signals.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, macro\_signal, trend\_signal, carry\_signal FROM fx\_signals}
+    \item \texttt{WITH orthogonal AS (SELECT date, macro\_signal - beta\_trend * trend - beta\_carry * carry as pure\_macro)}
+    \item \texttt{SELECT correlation(pure\_macro\_return, trend\_return) as residual\_correlation FROM orthogonalized\_returns}
+    \item \texttt{CREATE PURE\_SIGNAL AS SELECT date, sign(orthogonal\_macro) as direction, ABS(orthogonal\_macro) as strength}
+    \item \texttt{SELECT period, sharpe\_before\_ortho, sharpe\_after\_ortho, improvement FROM signal\_comparison}
+\end{itemize}
+}
+
+\usecase{D9: Hierarchical Regime Allocation Combining Triplets and PCA}{
+Implements multi-level strategy switching based on market state indicators and signal quality.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, volatility\_spike, liquidity\_score, CASE WHEN vol > 95th\_pct THEN 'crisis' ELSE 'normal' END}
+    \item \texttt{WITH strategy\_selection AS (SELECT regime, CASE WHEN liquidity < 0.3 THEN 'daily\_pca' ELSE 'intraday\_triplet' END)}
+    \item \texttt{SELECT hierarchy\_level, strategy\_type, allocation\_weight FROM regime\_tree WHERE node = current\_state}
+    \item \texttt{CREATE DYNAMIC\_BOOK AS SELECT position * regime\_weight * strategy\_confidence as final\_position}
+    \item \texttt{SELECT regime, strategy\_mix, realized\_sharpe FROM hierarchical\_backtest ORDER BY sharpe DESC}
+\end{itemize}
+}
+
+\section{Macro Factor \& Nowcasting Based Strategies}
+
+\usecase{E1: Nowcasting Index Efficacy}{
+Evaluates the predictive power of growth beat indices (combining hard and soft economic data) on forward equity returns for specific countries. This analysis helps validate the effectiveness of nowcasting approaches in tactical asset allocation.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT country, growth\_beat\_index, LEAD(equity\_return, 90) OVER (ORDER BY date) as fwd\_3m\_return FROM nowcast\_data WHERE country = 'Australia'}
+    \item \texttt{WITH rolling\_corr AS (SELECT date, CORR(growth\_beat, fwd\_3m\_return) OVER (ORDER BY date ROWS 252 PRECEDING) as correlation)}
+    \item \texttt{SELECT year, AVG(correlation) as avg\_correlation FROM growth\_equity\_link WHERE date BETWEEN '2005-01-01' AND '2015-12-31' GROUP BY year}
+    \item \texttt{CREATE VIEW nowcast\_efficacy AS SELECT pc1\_loading, data\_type, contribution FROM growth\_beat\_components WHERE country = 'AUS'}
+    \item \texttt{SELECT quantile, AVG(forward\_return) as avg\_ret FROM (SELECT NTILE(5) OVER (ORDER BY growth\_beat) as quantile, forward\_return) GROUP BY quantile}
+\end{itemize}
+}
+
+\usecase{E2: Orthogonalization Impact}{
+Measures the trade-off between strategy independence and performance when orthogonalizing macro signals against traditional factors like carry and trend. Critical for understanding portfolio construction decisions.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT strategy\_version, sharpe\_ratio, correlation\_to\_carry FROM macro\_fx\_performance WHERE version IN ('W/ Timing', 'Timing + Ort.')}
+    \item \texttt{WITH performance\_change AS (SELECT (ort\_sharpe - timing\_sharpe) as sharpe\_delta, (ort\_carry\_corr - timing\_carry\_corr) as corr\_delta)}
+    \item \texttt{SELECT date, cumulative\_return, drawdown FROM strategy\_comparison WHERE orthogonalized = true}
+    \item \texttt{CREATE TABLE orthogonalization\_impact AS SELECT factor, beta\_before, beta\_after, (beta\_after - beta\_before) as beta\_change}
+    \item \texttt{SELECT strategy, information\_ratio, tracking\_error FROM independent\_alpha WHERE orthogonalization\_applied = true}
+\end{itemize}
+}
+
+\usecase{E3: Signal Timing Value}{
+Quantifies the impact of sentiment-based timing filters on strategy performance during crisis periods. Essential for understanding defensive overlays in systematic strategies.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, strategy\_return, max\_drawdown FROM macro\_equity WHERE date BETWEEN '2008-01-01' AND '2008-12-31' GROUP BY strategy\_version}
+    \item \texttt{WITH crisis\_performance AS (SELECT MIN(cumulative\_return) as max\_dd FROM returns WHERE gsi\_filter = true AND crisis\_period = '2008')}
+    \item \texttt{SELECT strategy, (dd\_with\_timing - dd\_without\_timing) as drawdown\_improvement FROM crisis\_analysis WHERE event = 'GFC'}
+    \item \texttt{CREATE VIEW timing\_effectiveness AS SELECT date, gsi\_score, position\_adjustment, avoided\_loss FROM defensive\_overlay}
+    \item \texttt{SELECT period, hit\_rate, false\_positive\_rate FROM timing\_signal\_accuracy WHERE market\_regime = 'crisis'}
+\end{itemize}
+}
+
+\usecase{E4: Regional Macro Influence}{
+Analyzes how US monetary policy cycles affect the explanatory power of US inflation indices on global bond markets. Crucial for understanding cross-border macro transmission.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, us\_inflation\_r2, total\_r2, us\_proportion FROM bond\_attribution WHERE asset\_region != 'US' GROUP BY fed\_regime}
+    \item \texttt{WITH policy\_regimes AS (SELECT date, CASE WHEN fed\_action = 'tightening' THEN r\_squared ELSE NULL END as tightening\_r2)}
+    \item \texttt{SELECT policy\_phase, AVG(us\_beat\_influence) as avg\_influence, COUNT(*) as observations FROM macro\_spillover GROUP BY policy\_phase}
+    \item \texttt{CREATE INDEX idx\_policy\_turning\_points ON fed\_events(date, policy\_shift) WHERE is\_turning\_point = true}
+    \item \texttt{SELECT turning\_point\_date, r2\_before, r2\_after, (r2\_after - r2\_before) as r2\_change FROM policy\_impact\_analysis}
+\end{itemize}
+}
+
+\usecase{E5: Cross-Asset Macro Sensitivity}{
+Compares portfolio sensitivities to global growth versus inflation factors to understand macro risk exposures and inform hedging decisions.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, regr\_slope(portfolio\_return, global\_growth) as growth\_beta, regr\_slope(portfolio\_return, global\_inflation) as inflation\_beta}
+    \item \texttt{WITH factor\_attribution AS (SELECT factor, SUM(weight * sensitivity) as portfolio\_sensitivity FROM holdings JOIN factor\_loadings)}
+    \item \texttt{SELECT asset\_class, growth\_loading, inflation\_loading FROM macro\_factor\_decomposition WHERE portfolio = 'macro\_factor'}
+    \item \texttt{CREATE VIEW macro\_exposures AS SELECT date, growth\_contribution, inflation\_contribution, interaction\_term FROM return\_attribution}
+    \item \texttt{SELECT regime, AVG(ABS(growth\_beta)) as avg\_growth\_sensitivity, AVG(ABS(inflation\_beta)) as avg\_inflation\_sensitivity}
+\end{itemize}
+}
+
+\usecase{E6: Signal Decay Comparison}{
+Analyzes the half-life of different signals to optimize rebalancing frequencies and reduce transaction costs while maintaining alpha capture.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT signal\_type, execution\_delay, sharpe\_ratio / baseline\_sharpe as retention\_ratio FROM decay\_analysis WHERE retention\_ratio = 0.5}
+    \item \texttt{WITH half\_life AS (SELECT signal, MIN(delay\_days) as days\_to\_half WHERE sharpe\_retention < 0.5 GROUP BY signal)}
+    \item \texttt{SELECT signal\_name, optimal\_rebalance\_freq FROM (SELECT *, CASE WHEN half\_life < 10 THEN 'daily' ELSE 'weekly' END as optimal\_freq)}
+    \item \texttt{CREATE TABLE rebalance\_optimization AS SELECT signal, frequency, expected\_turnover, net\_sharpe FROM frequency\_analysis}
+    \item \texttt{SELECT correlation(half\_life, optimal\_frequency) as decay\_frequency\_relationship FROM signal\_characteristics}
+\end{itemize}
+}
+
+\section{Sentiment \& Options-Implied Strategies}
+
+\usecase{F1: Skew Signal Performance}{
+Analyzes performance attribution across asset classes in cross-asset skew strategies to identify which markets contribute most to returns.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT asset\_class, AVG(annualized\_return) as avg\_contribution FROM skew\_attribution WHERE asset\_class IN ('Equities', 'FX') GROUP BY asset\_class}
+    \item \texttt{WITH asset\_performance AS (SELECT date, SUM(CASE WHEN asset\_type = 'equity' THEN daily\_pnl END) as equity\_pnl)}
+    \item \texttt{SELECT asset, proportion\_long, average\_return, contribution\_to\_portfolio FROM skew\_strategy\_breakdown}
+    \item \texttt{CREATE VIEW skew\_decomposition AS SELECT date, equity\_skew\_pnl, fx\_skew\_pnl, commodity\_skew\_pnl FROM daily\_attribution}
+    \item \texttt{SELECT post\_2008\_return - pre\_2008\_return as regime\_change\_impact FROM skew\_performance WHERE asset = 'equity\_aggregate'}
+\end{itemize}
+}
+
+\usecase{F2: Volatility Slope Signal Dynamics}{
+Examines how volatility term structure strategies adjust allocations during stressed market conditions when short-term vol exceeds long-term averages.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, commodity\_weight FROM vol\_slope\_positions WHERE commodity\_iv > (SELECT AVG(commodity\_iv) FROM trailing\_year) * 1.5}
+    \item \texttt{WITH vol\_regime AS (SELECT date, CASE WHEN iv\_1m / iv\_1y > 1.2 THEN 'steep' ELSE 'normal' END as slope\_regime)}
+    \item \texttt{SELECT slope\_zscore, allocation\_change FROM vol\_slope\_signals WHERE asset\_class = 'commodities' AND vol\_elevated = true}
+    \item \texttt{CREATE SIGNAL AS SELECT WHEN vol\_slope\_zscore > 2 AND asset = 'commodity' THEN allocation * 0.5 ELSE allocation END}
+    \item \texttt{SELECT period, AVG(commodity\_weight) as avg\_allocation FROM slope\_strategy WHERE relative\_vol > 1.0 GROUP BY period}
+\end{itemize}
+}
+
+\usecase{F3: Correlation Signal Nature Analysis}{
+Evaluates whether implied correlation signals exhibit momentum or reversal characteristics across different asset classes for strategy design.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, CASE WHEN corr\_zscore > 1 AND next\_month\_return > 0 THEN 1 ELSE 0 END as hit FROM correlation\_predictions}
+    \item \texttt{WITH rolling\_accuracy AS (SELECT date, AVG(hit) OVER (ORDER BY date ROWS 252 PRECEDING) as hit\_rate\_1y)}
+    \item \texttt{SELECT asset\_class, signal\_type, AVG(directional\_accuracy) as avg\_hit\_rate FROM correlation\_signal\_performance}
+    \item \texttt{CREATE VIEW signal\_nature AS SELECT 'equity' as asset, 'reversal' as nature, correlation(signal, -forward\_return) as consistency}
+    \item \texttt{SELECT month, momentum\_hit\_rate, reversal\_hit\_rate, (momentum\_hit\_rate - reversal\_hit\_rate) as differential}
+\end{itemize}
+}
+
+\usecase{F4: VRP Strategy Enhancement Analysis}{
+Tests modifications to volatility risk premium strategies using z-score thresholds to improve signal quality and performance.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, position FROM vrp\_signals WHERE ABS(vrp\_zscore) > 1.0 AND asset\_class = 'equity'}
+    \item \texttt{WITH filtered\_performance AS (SELECT strategy, sharpe\_ratio FROM vrp\_backtest WHERE signal\_threshold = 1.0)}
+    \item \texttt{SELECT threshold, hit\_rate, avg\_return, max\_drawdown FROM vrp\_threshold\_analysis WHERE threshold IN (0.5, 1.0, 1.5, 2.0)}
+    \item \texttt{CREATE BACKTEST AS SELECT date, CASE WHEN vrp\_z > 1 THEN 'long' WHEN vrp\_z < -1 THEN 'short' ELSE 'flat' END as position}
+    \item \texttt{SELECT original\_sharpe, modified\_sharpe, (modified\_sharpe - original\_sharpe) as improvement FROM vrp\_comparison}
+\end{itemize}
+}
+
+\section{Rates-FX/Equity \& Commds $\rightarrow$
+Credit \& Cross-Market Factor Strategies}
+
+\usecase{G1: Rates Momentum Tenor Sensitivity}{
+Analyzes optimal interest rate tenors and lookback windows for rates-FX $\rightarrow$
+Credit momentum strategies to maximize risk-adjusted returns.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT tenor, lookback\_days, sharpe\_ratio FROM rates\_fx\_heatmap WHERE lookback\_days = 21 AND tenor IN ('3M', '2Y')}
+    \item \texttt{WITH tenor\_comparison AS (SELECT (sharpe\_3m - sharpe\_2y) as sharpe\_improvement FROM tenor\_analysis WHERE lookback = '1M')}
+    \item \texttt{SELECT rate\_tenor, AVG(sharpe) as avg\_sharpe, STDDEV(sharpe) as sharpe\_stability FROM strategy\_performance GROUP BY tenor}
+    \item \texttt{CREATE VIEW optimal\_parameters AS SELECT tenor, lookback, sharpe WHERE sharpe = (SELECT MAX(sharpe) FROM rates\_fx\_grid)}
+    \item \texttt{SELECT lookback\_period, COUNT(DISTINCT optimal\_tenor) as tenor\_consistency FROM parameter\_stability GROUP BY lookback}
+\end{itemize}
+}
+
+\usecase{G2: Country Risk Filter Impact}{
+Monitors the effectiveness of correlation-based filters in removing unfavorable currency exposures during different market regimes.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, COUNT(*) as filtered\_pairs FROM fx\_universe WHERE correlation\_1y < 0 GROUP BY date, (date < '2008-01-01')}
+    \item \texttt{WITH filter\_activity AS (SELECT year, AVG(pairs\_filtered) as avg\_filtered, regime FROM monthly\_filter\_stats GROUP BY year)}
+    \item \texttt{SELECT pre\_2008\_avg, post\_2008\_avg, (post\_2008\_avg - pre\_2008\_avg) as filter\_increase FROM regime\_comparison}
+    \item \texttt{CREATE TABLE filter\_effectiveness AS SELECT date, unfiltered\_return, filtered\_return, avoided\_loss FROM strategy\_comparison}
+    \item \texttt{SELECT currency, filtering\_frequency, cumulative\_impact FROM country\_risk\_analysis WHERE emerging\_market = true}
+\end{itemize}
+}
+
+\section{Intraday Seasonality Strategies}
+
+\usecase{H1: Asset-Specific Intraday Patterns}{
+Identifies statistically significant hourly return patterns in specific assets after multiple testing corrections for reliable signal generation.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT hour, AVG(hourly\_return) as mean\_return, t\_statistic, bh\_adjusted\_pvalue FROM intraday\_analysis WHERE asset = 'Bund'}
+    \item \texttt{WITH significant\_hours AS (SELECT hour FROM hourly\_stats WHERE bh\_pvalue < 0.05 AND mean\_return > 0 ORDER BY t\_stat DESC)}
+    \item \texttt{SELECT trading\_hour, cumulative\_return, sharpe\_ratio FROM hour\_performance WHERE holding\_period = 60 AND significant = true}
+    \item \texttt{CREATE VIEW optimal\_trading\_hours AS SELECT asset, hour, expected\_return, win\_rate FROM significant\_patterns}
+    \item \texttt{SELECT hour, COUNT(*) as significant\_assets FROM cross\_asset\_patterns WHERE p\_value < 0.05 GROUP BY hour}
+\end{itemize}
+}
+
+\usecase{H2: Transaction Cost Break-Even Analysis}{
+Determines minimum prediction accuracy required for high-frequency strategies to overcome transaction costs at different trading frequencies.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT ic, net\_sharpe FROM cost\_analysis WHERE frequency = '5min' AND net\_sharpe >= 0 ORDER BY ic LIMIT 1}
+    \item \texttt{WITH breakeven AS (SELECT frequency, MIN(information\_coefficient) as min\_ic FROM performance\_grid WHERE net\_sharpe > 0)}
+    \item \texttt{SELECT trading\_frequency, required\_accuracy, expected\_turnover, cost\_per\_trade FROM frequency\_feasibility}
+    \item \texttt{CREATE TABLE ic\_requirements AS SELECT asset\_class, frequency, breakeven\_ic, feasible\_sharpe FROM cost\_adjusted\_analysis}
+    \item \texttt{SELECT frequency, (gross\_sharpe - net\_sharpe) as cost\_drag, optimal\_ic FROM high\_frequency\_viability}
+\end{itemize}
+}
+
+\usecase{H3: Out-of-Sample Performance Attribution}{
+Decomposes performance degradation between in-sample and out-of-sample periods to identify whether decay is due to signal fade or cost structure.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT period, gross\_sharpe, net\_sharpe, (gross\_sharpe - net\_sharpe) as cost\_impact FROM performance\_breakdown}
+    \item \texttt{WITH decay\_analysis AS (SELECT (is\_gross\_sharpe - oos\_gross\_sharpe) as signal\_decay, (is\_cost - oos\_cost) as cost\_increase)}
+    \item \texttt{SELECT component, contribution\_to\_decay FROM performance\_attribution WHERE component IN ('signal', 'turnover', 'spread')}
+    \item \texttt{CREATE VIEW oos\_diagnosis AS SELECT date, turnover\_rate, cost\_per\_turnover, gross\_return FROM daily\_metrics}
+    \item \texttt{SELECT is\_sharpe, oos\_sharpe, decay\_from\_signal, decay\_from\_costs FROM comprehensive\_attribution}
+\end{itemize}
+}
+
+\usecase{H4: Execution Delay Sensitivity}{
+Quantifies performance degradation from execution delays to establish latency requirements for strategy implementation.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT delay\_minutes, sharpe\_ratio, (baseline\_return - delayed\_return) as return\_impact FROM execution\_sensitivity}
+    \item \texttt{WITH delay\_curve AS (SELECT delay, return\_degradation, -1 * regr\_slope(return, delay) as decay\_rate FROM delay\_analysis)}
+    \item \texttt{SELECT execution\_delay, annualized\_return, max\_acceptable\_delay FROM latency\_requirements WHERE return > min\_threshold}
+    \item \texttt{CREATE MODEL delay\_impact AS SELECT delay\_minutes, EXP(-decay\_coefficient * delay) * baseline\_return as expected\_return}
+    \item \texttt{SELECT strategy, delay\_tolerance, required\_infrastructure FROM implementation\_specs WHERE sharpe\_retention > 0.8}
+\end{itemize}
+}
+
+\section{Intraday Momentum/Reversal Strategies - Triplets}
+
+\usecase{I1: Triplet Pattern Optimization}{
+Identifies optimal lag-vantage-target combinations for intraday pattern recognition in specific assets and market conditions.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT lag\_hours, target\_hours, spearman\_correlation FROM triplet\_grid WHERE vantage = '10:00' AND asset = 'WTI' ORDER BY correlation DESC}
+    \item \texttt{WITH momentum\_patterns AS (SELECT lag, target, correlation WHERE correlation > 0 AND p\_value < 0.05 AND profitable = true)}
+    \item \texttt{SELECT vantage\_time, optimal\_lag, optimal\_target, expected\_sharpe FROM best\_triplets WHERE asset\_class = 'energy'}
+    \item \texttt{CREATE VIEW triplet\_heatmap AS SELECT lag, vantage, target, CASE WHEN corr > 0 THEN 'momentum' ELSE 'reversal' END}
+    \item \texttt{SELECT hour, AVG(max\_correlation) as peak\_predictability FROM hourly\_triplet\_strength GROUP BY hour ORDER BY peak\_predictability DESC}
+\end{itemize}
+}
+
+\usecase{I2: Information Content by Time of Day}{
+Analyzes which trading hours contain the most statistically significant and profitable patterns across different asset classes.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT vantage\_hour, AVG(information\_content) as avg\_ic FROM pattern\_significance WHERE asset\_class = 'equity' GROUP BY vantage\_hour}
+    \item \texttt{WITH hourly\_stats AS (SELECT hour, COUNT(*) as significant\_patterns, AVG(net\_sharpe) as avg\_sharpe FROM profitable\_patterns)}
+    \item \texttt{SELECT exchange\_hour, median\_ic, percentile\_75\_ic FROM information\_distribution WHERE significant\_and\_profitable = true}
+    \item \texttt{CREATE INDEX idx\_vantage\_quality ON triplet\_patterns(vantage\_hour, information\_content, profitability)}
+    \item \texttt{SELECT time\_zone, optimal\_trading\_hours FROM cross\_market\_patterns WHERE ic\_threshold > 0.1 ORDER BY avg\_ic DESC}
+\end{itemize}
+}
+
+\usecase{I3: Cross-Market Spillover Effects}{
+Measures how US market movements influence next-day patterns in other markets for international portfolio construction.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, regr\_slope(dax\_return, lag(spx\_return)) as spx\_beta FROM cross\_market\_regression WHERE year >= 2015}
+    \item \texttt{WITH rolling\_influence AS (SELECT date, beta\_to\_spx OVER (ORDER BY date ROWS 252 PRECEDING) as rolling\_beta\_1y)}
+    \item \texttt{SELECT market, us\_influence\_coefficient, t\_statistic, r\_squared FROM spillover\_analysis WHERE p\_value < 0.05}
+    \item \texttt{CREATE VIEW beta\_evolution AS SELECT date, market, rolling\_beta, regime FROM cross\_market\_dynamics WHERE base = 'SPX'}
+    \item \texttt{SELECT period, AVG(beta) as avg\_influence, STDDEV(beta) as influence\_stability FROM us\_spillover GROUP BY period}
+\end{itemize}
+}
+
+\usecase{I4: Dynamic Signal Type Selection}{
+Tracks the proportion of momentum versus reversal signals in adaptive strategies to understand regime-dependent behavior.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT date, COUNT(CASE WHEN signal\_type = 'momentum' THEN 1 END) / COUNT(*) as momentum\_proportion FROM active\_signals}
+    \item \texttt{WITH signal\_composition AS (SELECT year, month, SUM(momentum\_weight) as mom\_weight, SUM(reversal\_weight) as rev\_weight)}
+    \item \texttt{SELECT asset, primary\_pattern, secondary\_pattern, switching\_frequency FROM pattern\_dynamics WHERE year = 2019}
+    \item \texttt{CREATE VIEW signal\_mix AS SELECT date, momentum\_count, reversal\_count, mixed\_count FROM daily\_signal\_composition}
+    \item \texttt{SELECT quarter, dominant\_signal\_type, performance\_contribution FROM signal\_attribution WHERE portfolio = 'adaptive'}
+\end{itemize}
+}
+
+\usecase{I5: Crisis Period Performance Analysis}{
+Compares strategy behavior during different volatility events to assess robustness and crisis alpha generation.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT event, SUM(daily\_return) as event\_return FROM crisis\_performance WHERE event IN ('COVID\_2020', 'VIX\_2018') GROUP BY event}
+    \item \texttt{WITH drawdown\_comparison AS (SELECT event, MAX(drawdown) as max\_dd, recovery\_days FROM crisis\_analysis)}
+    \item \texttt{SELECT date, cumulative\_return, volatility FROM performance WHERE date BETWEEN '2020-03-01' AND '2020-03-31'}
+    \item \texttt{CREATE TABLE crisis\_alpha AS SELECT event, crisis\_return, normal\_return, (crisis\_return - normal\_return) as excess\_return}
+    \item \texttt{SELECT volatility\_regime, avg\_daily\_return, sharpe\_ratio, skewness FROM regime\_performance ORDER BY volatility\_regime}
+\end{itemize}
+}
+
+\section{Portfolio Construction \& Risk Management}
+
+\usecase{J1: Turnover Constraint Optimization}{
+Determines optimal turnover limits that balance alpha capture with transaction costs for different strategy types.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT turnover\_limit, net\_sharpe FROM turnover\_analysis WHERE strategy = 'Sentiment' AND net\_sharpe = MAX(net\_sharpe)}
+    \item \texttt{WITH turnover\_curve AS (SELECT constraint, sharpe\_ratio, sharpe\_ratio - LAG(sharpe\_ratio) as marginal\_benefit)}
+    \item \texttt{SELECT portfolio, optimal\_turnover, unconstrained\_turnover, cost\_savings FROM turnover\_optimization}
+    \item \texttt{CREATE VIEW turnover\_efficiency AS SELECT date, actual\_turnover, target\_turnover, tracking\_error FROM daily\_turnover}
+    \item \texttt{SELECT constraint\_level, avg\_alpha\_retained, implementation\_shortfall FROM constraint\_impact WHERE optimal = true}
+\end{itemize}
+}
+
+\usecase{J2: Diversification Benefit Quantification}{
+Measures correlation benefits of adding new strategies to existing portfolios for optimal strategy combination.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT strategy1, strategy2, correlation\_15y FROM correlation\_matrix WHERE strategy2 = 'Trend' ORDER BY correlation\_15y}
+    \item \texttt{WITH diversification AS (SELECT new\_factor, 1 - correlation\_to\_existing as diversification\_benefit FROM factor\_analysis)}
+    \item \texttt{SELECT portfolio\_combination, combined\_sharpe, standalone\_sharpe, (combined - standalone) as synergy FROM combinations}
+    \item \texttt{CREATE TABLE optimal\_mix AS SELECT factors, weights, expected\_sharpe, expected\_drawdown FROM portfolio\_optimization}
+    \item \texttt{SELECT time\_period, average\_correlation, portfolio\_efficiency FROM rolling\_diversification WHERE window = '5Y'}
+\end{itemize}
+}
+
+\usecase{J3: CPPI Parameter Sensitivity}{
+Analyzes how different drawdown limits in portfolio insurance strategies affect return-risk profiles.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT cppi\_limit, annualized\_return, max\_drawdown FROM cppi\_backtest WHERE limit IN (4, 6) AND period = 'out\_of\_sample'}
+    \item \texttt{WITH protection\_cost AS (SELECT limit, (unconstrained\_return - cppi\_return) as return\_cost, drawdown\_reduction)}
+    \item \texttt{SELECT drawdown\_threshold, deleverage\_frequency, whipsaw\_cost FROM cppi\_analysis WHERE threshold < baseline}
+    \item \texttt{CREATE MODEL cppi\_optimization AS SELECT limit, expected\_return, tail\_risk, cost\_of\_protection FROM parameter\_sweep}
+    \item \texttt{SELECT scenario, cppi\_performance, buy\_hold\_performance, outperformance FROM stress\_test\_results}
+\end{itemize}
+}
+
+\usecase{J4: Risk Parity Method Comparison}{
+Compares hierarchical risk parity against simpler weighting schemes to quantify the value of sophisticated risk allocation.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT weighting\_method, sharpe\_ratio, max\_drawdown FROM portfolio\_comparison WHERE method IN ('HRP', 'Equal\_Weight')}
+    \item \texttt{WITH performance\_diff AS (SELECT date, hrp\_return - ew\_return as excess\_return, hrp\_vol - ew\_vol as vol\_diff)}
+    \item \texttt{SELECT method, diversification\_ratio, concentration\_score FROM weighting\_analysis WHERE period = 'out\_of\_sample'}
+    \item \texttt{CREATE VIEW weight\_stability AS SELECT date, method, SUM(ABS(weight\_change)) as rebalance\_magnitude FROM daily\_weights}
+    \item \texttt{SELECT correlation\_regime, best\_method, performance\_gap FROM regime\_dependent\_comparison ORDER BY performance\_gap DESC}
+\end{itemize}
+}
+
+\usecase{J5: Adaptive Weight Effectiveness}{
+Evaluates dynamic weighting schemes that adjust based on recent performance versus static allocation methods.
+\begin{itemize}[leftmargin=*]
+    \item \texttt{SELECT asset, initial\_hrp\_weight, AVG(adaptive\_weight) as avg\_oos\_weight FROM weight\_evolution WHERE asset = 'CADJPY'}
+    \item \texttt{WITH weight\_dynamics AS (SELECT date, asset, weight, performance\_score, weight\_adjustment FROM adaptive\_allocation)}
+    \item \texttt{SELECT asset, weight\_volatility, performance\_consistency FROM dynamic\_weighting WHERE adaptation\_active = true}
+    \item \texttt{CREATE TABLE weight\_attribution AS SELECT period, static\_contribution, dynamic\_adjustment, total\_performance}
+    \item \texttt{SELECT update\_frequency, weight\_turnover, performance\_improvement FROM adaptation\_analysis WHERE significant = true}
+\end{itemize}
+}
+
+\end{document}
