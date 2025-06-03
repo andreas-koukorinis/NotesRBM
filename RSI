@@ -1,0 +1,61 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage[english]{babel}
+%\usepackage[colorinlistoftodos]{todonotes}
+\usepackage{multirow}
+\usepackage{amsmath,blkarray}
+\usepackage[margin = 1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[noend]{algpseudocode}
+\usepackage{bbm}
+
+\usepackage{amssymb}
+
+\title{A selective study across asset classes for directional efficacy of the risk sentiment index}
+\author{Andreas Koukorinis}
+
+
+
+
+\begin{document}
+\maketitle
+The risk sentiment aggregates 9 barometers of risk across asset classes.
+\begin{enumerate}
+    \item Equity implied volatility 
+    \item Financial sector risk (Equity and Rates perspective)
+    \item Interest-rate implied volatility
+    \item Short-term interest rate liquidity risk
+    \item Non-financial CDS spreads 
+    \item FX implied volatility
+    \item Volatility Slope (Equity $\&$ FX )
+    \item Volatility Skew (Equity $\&$ FX )
+\end{enumerate}
+
+We would like to understand the efficacy of the efficacy of the Risk Sentiment Index (RSI), in predicting returns - over 1-week, 2-week, and 1-month
+horizons.
+
+\subsection{Experiment set-up}
+\begin{enumerate}
+    \item Transform the RSI levels to a signal that is bounded between -1 and 1 \\
+    \begin{equation}
+        signal_{t} =  1 - \frac{2}{100} \times RSI_t
+    \end{equation}
+    \item Estimate the positive (negative) correlation between the signal and the future return indicates a momentum (reversal).
+    \item Divide the signal in 5 buckets and calculate the average of returns of a given market over different time horizons. The returns associated with a bucket is:
+    \begin{equation}
+        \mbox{returns}^{Bucket_i} = \mbox{returns}_{t + h} | \mbox{RSI}_{t} \in \mbox{Bucket}_i
+    \end{equation}
+    Where  $Bucket_i$ is the $i^{th}$ bucket, $\mbox{returns}_{t + h}$ is the return of the instrument over time horizon \textit{h}
+\end{enumerate}
+The output of the above should be a bar-plot (and a matrix essentially) where the x-axis is the bucket values of the signal and the y-axis are the forward returns. The bar will be the average instrument returns per bucket of the RSI.
+
+\subsubsection{Questions to answer:}
+\begin{enumerate}
+    \item What is the relationship with RSI for each instrument/basket? Show if a Convex relationship with the RSI or not
+    \item Is there a tendency to rally or sell off after RSI indicates a high risk zone or a low risk zone? 
+    \item Does it point to a reversal or a sell-off in a high risk zone or a low risk zone?
+    \item What is the behaviour pre- and post- 2019, 2020, Ukraine war , QT announcement?
+    \item Does the sign of the slope change?
+\end{enumerate}
+\end{document}
