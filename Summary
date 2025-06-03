@@ -1,0 +1,74 @@
+mmary of “How Each Use Case Fits In”
+Below is a quick reference mapping every use case to the component(s) where it is implemented:
+
+Use Case ID	Name	Ingestion	Slot Manager	Streaming Compute	Realtime Z-Score	Batch Analytics	Dash UI
+A1	Historical Curve Positioning	raw curve	calendar	slot_returns	zscore_alert	cross_sectional_spread.py (percentiles)	Curve Positioning page
+A2	Curve Slope Comparison vs. History	raw curve	calendar	slot_returns	zscore_alert	curve_pca_analysis.py (slopes + stats)	Curve Slope Comparison page
+A3	IG vs HY Compression/Decompression	raw spreads	calendar	slot_returns	zscore_alert	cross_sectional_spread.py (spread_diff)	IG vs HY Compression page
+A4	Country vs Corporate Spread Influence	raw spreads	calendar	slot_returns	zscore_alert	cross_sectional_spread.py (regression)	Country vs Corporate Spread page
+A5	PCA-Implied Fair Value vs. Actual Yield	raw curve	calendar	slot_returns	zscore_alert	curve_pca_analysis.py (PCA residuals)	PCA Fair Value page
+A6	Attribution Across Trend/Carry/Value	N/A	N/A	N/A	N/A	equity_factor_analysis.py (factor P/L)	Factor Attribution page
+A7	Term Structure Dislocation via PCA	raw curve	calendar	slot_returns	zscore_alert	curve_pca_analysis.py (segment PCA)	Curve Segment Diagnostics page
+A9	Macro Factor Sensitivity	raw econ	event	slot_returns	zscore_alert	macro_nowcast_regression.py (rolling β)	Macro Sensitivity page
+A10	Spread Reaction to Volatility Spikes	raw vols	event	slot_returns	zscore_alert	event_impact_agg.py (pre/post windows)	Vol Spike Reaction page
+A12	Market Sensitivity to CPI Events	raw returns	event	slot_returns	zscore_alert	event_impact_agg.py (t_stat volatility)	CPI Impact page
+A13	ML-Based Factor Rotation Analysis	raw returns	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (ML attribution)	ML Factor Rotation page
+A14	Intraday Curve Decomposition	raw bars	calendar	slot_returns	zscore_alert	intraday_seasonality.py (decomposition)	Intraday Decomposition page
+A15	Intraday Curve Slope Reversal Detection	raw bars	calendar	slot_returns	zscore_alert	intraday_seasonality.py (triplet logic)	Slope Reversal page
+A16	Curves 5s30s vs 10s30s Box Distortion Diagnostics	raw curve	calendar	slot_returns	zscore_alert	curve_pca_analysis.py (box spreads)	Box Distortion Diagnostics page
+A17	PCA Residual-Based Curve Compression Trades	raw curve	calendar	slot_returns	zscore_alert	curve_pca_analysis.py (butterfly trades)	Compression Trades page
+A18	Event Effects on Specific Segments	raw flows	event	slot_returns	zscore_alert	cross_sectional_spread.py (flow regression)	Event Segments Impact page
+A19	Intraday Macro Shock Propagation	raw ticks	event	slot_returns	zscore_alert	event_impact_agg.py (shock sequence)	Shock Propagation page
+A20	Vol Surface Sentiment Regression to Credit	raw options	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (skew regression)	Vol Sentiment page
+A21	Nowcasting-Based Factor Exposure Timing	raw econ	calendar	slot_returns	zscore_alert	macro_nowcast_regression.py (regime weights)	Nowcast Timing page
+A22	Reversal/Momentum Profiles by Hour	raw returns	calendar	slot_returns	zscore_alert	intraday_seasonality.py (auto‐corr)	Reversal/Momentum page
+A23	Volume-Adjusted Time Regime Switching	raw ticks	volume	slot_returns	zscore_alert	intraday_seasonality.py (vol buckets)	Volume Regime page
+A24	Event-Clock Conditioning by Macro News Windows	raw returns	event	slot_returns	zscore_alert	event_impact_agg.py (optimal lags)	Event Conditioning page
+B1	Spread Curve Dynamics vs Forecast	raw curve	calendar	slot_returns	zscore_alert	curve_pca_analysis.py (forecast error)	Forecast Error page
+B2	Relative Value under Fed Policy	raw curve	event	slot_returns	zscore_alert	curve_pca_analysis.py (slope reaction)	Fed Policy RV page
+B3	Market-Implied vs Survey Inflation	raw macro	calendar	slot_returns	zscore_alert	macro_nowcast_regression.py (inflation gap)	Inflation Divergence page
+B4	Seasonality Deviation Analysis	raw spreads	calendar	slot_returns	zscore_alert	intraday_seasonality.py (monthly stats)	Seasonality Deviation page
+B5	Volatility Term Structure Repricing	raw options	event	slot_returns	zscore_alert	equity_factor_analysis.py (vol term slope)	Vol Term Repricing page
+C1	Factor Rotation	raw returns	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (rank & attrib)	Factor Rotation page
+C2	Strategy Performance vs Backtest	raw pnl	N/A	N/A	N/A	equity_factor_analysis.py (performance cones)	Perf vs Backtest page
+C3	Portfolio Attribution	raw holdings	N/A	N/A	N/A	equity_factor_analysis.py (look-through)	Portfolio Attribution page
+C4	ML Strategy Component Attribution	raw ml_preds	N/A	N/A	N/A	equity_factor_analysis.py (SHAP aggregation)	ML Attribution page
+C5	Conditional Factor Performance	raw vix, returns	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (conditional sharpe)	Conditional Factors page
+C6	Triplet-Based Signal Construction for Equity	raw ticks	calendar	slot_returns	zscore_alert	intraday_triplet.py (momentum/reversal)	Triplet Patterns page
+C7	Signal Decay Tracking in EU/US Indices	raw signals	N/A	N/A	N/A	equity_factor_analysis.py (IC rolling)	Signal Decay page
+C8	Learning Curve Stability Tests	raw cv_results	N/A	N/A	N/A	equity_factor_analysis.py (learning curves)	Learning Curve page
+D1	Cross-Asset Strategy Correlation	raw strategy	N/A	N/A	N/A	cross_asset_analysis.py (rolling corr)	X-Asset Correlation page
+D2	TAA Active Return Efficacy	raw returns	N/A	N/A	N/A	cross_asset_analysis.py (TAA backtest)	TAA Efficacy page
+D3	Inter-Asset Ratio Z-score	raw prices	calendar	slot_returns?	zscore_alert?	cross_asset_analysis.py (ratio stats)	Ratio Z-score page
+D4	Credit vs Equity Vol Lead/Lag	raw hy_oas, vix	calendar	slot_returns	zscore_alert	cross_asset_analysis.py (lead/lag)	Credit vs Vol page
+D5	Intraday Strategy Regime Sensitivity	raw pnl, gsi	event	slot_returns	zscore_alert	cross_asset_analysis.py (regime sharpe)	Regime Sensitivity page
+D6	Inter-day Macro Sentiment Alignment for CTA Basket	raw cta_pnl, econ	calendar	slot_returns	zscore_alert	cross_asset_analysis.py (CTA overlay)	CTA Macro Alignment page
+D7	Stagflation Quadrant Response of Commods vs Bonds	raw returns, macro	calendar	slot_returns	zscore_alert	cross_asset_analysis.py (regime returns)	Stagflation Quadrant page
+D8	FX Macro Signal Orthogonalisation	raw fx_signals, returns	calendar	slot_returns	zscore_alert	cross_asset_analysis.py (orthogonalize)	Pure Macro Signal page
+D9	Hierarchical Regime Allocation Combining Triplets & PCA	raw metrics	calendar	slot_returns	zscore_alert	cross_asset_analysis.py (hierarchical)	Hierarchical Allocation page
+E1	Nowcasting Index Efficacy	raw econ_surprises	calendar	slot_returns	zscore_alert	macro_nowcast_regression.py (rolling corr)	Nowcast Efficacy page
+E2	Orthogonalization Impact	raw macro_fx, carry, trend	calendar	slot_returns	zscore_alert	macro_nowcast_regression.py (orth impact)	Orthogonalization page
+E3	Signal Timing Value	raw equity_returns, gsi	event	slot_returns	zscore_alert	macro_nowcast_regression.py (crisis analysis)	Timing Effect page
+E4	Regional Macro Influence	raw bond_returns, fed_actions	event	slot_returns	zscore_alert	macro_nowcast_regression.py (spillover)	Regional Influence page
+E5	Cross-Asset Macro Sensitivity	raw port_return, factor	calendar	slot_returns	zscore_alert	macro_nowcast_regression.py (sensitivity)	Macro Exposures page
+E6	Signal Decay Comparison	raw signals	N/A	N/A	N/A	macro_nowcast_regression.py (half_life)	Decay Comparison page
+F1	Skew Signal Performance	raw option_skew, returns	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (skew attribution)	Skew Performance page
+F2	Volatility Slope Signal Dynamics	raw vol_surface, returns	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (vol regime)	Vol Slope Dynamics page
+F3	Correlation Signal Nature Analysis	raw corr_signals, returns	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (corr nature)	Correlation Nature page
+F4	VRP Strategy Enhancement Analysis	raw vrp_z, returns	calendar	slot_returns	zscore_alert	equity_factor_analysis.py (vrp backtest)	VRP Enhancement page
+G1	Rates Momentum Tenor Sensitivity	raw rates_fx_returns	calendar	slot_returns	zscore_alert	cross_asset_analysis.py (heatmap)	Tenor Sensitivity page
+G2	Country Risk Filter Impact	raw fx_correlation, returns	calendar	slot_returns	zscore_alert	cross_asset_analysis.py (filter analysis)	Country Filter page
+H1	Asset-Specific Intraday Patterns	raw minute_returns	calendar	slot_returns	zscore_alert	intraday_seasonality.py (t_stat + BH adjust)	Asset Intraday page
+H2	Transaction Cost Breakeven Analysis	raw ic_vs_cost	N/A	N/A	N/A	intraday_seasonality.py (cost vs IC)	Cost Breakeven page
+H3	Out-of-Sample Performance Attribution	raw backtest/forecasts	N/A	N/A	N/A	intraday_seasonality.py (OOS attribution)	OOS Attribution page
+H4	Execution Delay Sensitivity	raw ticks, backtest	N/A	N/A	N/A	intraday_seasonality.py (delay vs Sharpe)	Delay Sensitivity page
+I1	Triplet Pattern Optimization	raw minute_returns	calendar	slot_returns	zscore_alert	intraday_triplet.py (lag/vantage/target grid)	Triplet Optimization page
+I2	Information Content by Time of Day	raw triplet_metrics	calendar	slot_returns	zscore_alert	intraday_triplet.py (hourly IC stats)	Hourly IC page
+I3	Cross-Market Spillover Effects	raw fx_equity_ticks	calendar	slot_returns	zscore_alert	intraday_triplet.py (spillover regression)	Spillover Effects page
+I4	Dynamic Signal Type Selection	raw live_signals	calendar	slot_returns	zscore_alert	intraday_triplet.py (mix composition)	Signal Mix page
+I5	Crisis Period Performance Analysis	raw returns, crisis_flags	calendar	slot_returns	zscore_alert	intraday_triplet.py (crisis P/L)	Crisis Performance page
+J1	Turnover Constraint Optimization	raw tradelog, holdings	N/A	N/A	N/A	turnover_optimization.py (turnover vs Sharpe)	Turnover Optimization page
+J2	Diversification Benefit Quantification	raw strat_returns	N/A	N/A	N/A	cross_asset_analysis.py (diversification)	Diversification page
+J3	CPPI Parameter Sensitivity	raw cppi_backtest	N/A	N/A	N/A	cppi_sensitivity.py (parameter sweep)	CPPI Sensitivity page
+J4	Risk Parity Method Comparison	raw risk_metrics	N/A	N/A	N/A	risk_parity.py (HRP vs EW comparison)	Risk Parity page
+J5	Adaptive Weight Effectiveness	raw port_weights	N/A	N/A	N/A	adaptive_weights.py (weight volatility)	Adaptive Weights page
