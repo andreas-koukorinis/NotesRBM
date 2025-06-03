@@ -1,0 +1,372 @@
+Written Walk-Through
+Below is a layer-by-layer description, with notes on where each group of use cases (A1–D9, E1–E6, F1–F4, G1–G2, H1–H4, I1–I5, J1–J5) lives.
+
+1. External Data → Ingestion Layer
+Raw Feeds
+• Market ticks (all asset classes: credit bonds/OTC feeds, FX tick feeds, equity trades)
+• Order book snapshots (if available)
+• Daily EOD data (curve levels for yield curves, sector‐rating buckets, indices)
+• Macro calendars & news (CPI, FOMC, ECB, NFP timestamps plus surprise values)
+
+Ingestion (PySpark Structured Streaming)
+
+Kafka topics or Kinesis streams ingest ticks/trades.
+
+tick_ingestor.py: a PySpark Structured Streaming job that reads from Kafka → enriches with a schema → writes minute‐OHLC (or basis‐point spread) “bars” to Delta delta://raw/market_ticks/{date}/.
+
+orderbook_ingestor.py: writes top10 bid/ask to Delta delta://raw/order_book/{date}/.
+
+macro_event_loader.py (batch or micro-batch): reads official macro files (CSV or API) → writes to Postgres (public.macro_calendar) and to Delta delta://raw/macro_events/{date}/.
+
+Covered Use Cases:
+• A1–A5, A9–A10, A12–A18 rely on accurate time-stamped curve/spread data in Delta.
+• E1–E6 ingest nowcast inputs (economic surprise series) via the same pipeline.
+• F1–F4 need EOD volatility surface data (ingested alongside raw ticks).
+• G1–G2 require FX/Rate cross-asset tick data.
+• H1–H4, I1–I5: full intraday tick data.
+• J1–J5: portfolio holdings/trade data (ingested similarly).
+
+2. Event & Slot Manager
+Purpose: Align raw data to the three “time measures” in your use cases:
+
+Calendar clock (hourly, session boundaries)
+
+Volume clock (first $X notional, first N ticks, etc.)
+
+Event clock (CPI, FOMC, NFP windows)
+
+Hybrid clock (volume buckets that only open after a macro release)
+
+Implementation:
+• A pure‐Python module src/event_manager/clock_manager.py that:
+
+Loads four YAMLs under configs/clocks/ (calendar_slots.yaml, volume_slots.yaml, event_slots.yaml, hybrid_slots.yaml).
+
+Publishes three Kafka topics (or Spark structured streams) for each boundary:
+– calendar_boundary_stream (when the system clock hits an hour or defined slot_end)
+– volume_boundary_stream (computed by a PySpark operator that sums “size” from market_ticks until threshold)
+– event_boundary_stream (join macro_events with UDF to emit “pre”/“post” boundary events)
+– hybrid_boundary_stream (listens to event_boundary_stream + volume metrics; waits post_event_delay before forwarding a “volume” boundary)
+
+Output:
+For each boundary event you get a record like
+
+json
+Copy
+Edit
+{ "entity_id": "US_IG_2030_10y", 
+  "clock_type": "calendar", 
+  "slot_id": "cal_10", 
+  "boundary_ts": "2025-06-01T10:00:00Z" }
+(or similarly for “vol_1e6_us_credit” or “evt_CPI_pre_30”, etc.)
+
+Covered Use Cases:
+• H1–H4 (intraday seasonality) use calendar boundaries.
+• H2 also needs counts of volume boundaries to assess transaction costs.
+• I1–I5 (triplet/information content) pivot on various vantage times—first identified by calendar or volume boundaries.
+• A10, A12, A18, D5, E3, F2, G2, etc. need “event_clock” boundaries (e.g. pre-CPI, post-CPI).
+• D3, D4, D8 (cross‐asset) may combine multiple clocks (e.g. FX volume clocks + event clocks).
+
+3. Streaming Feature Compute (“slot_returns”)
+Job: src/streaming/streaming_slots.py (PySpark Structured Streaming)
+
+Input streams:
+• calendar_boundary_stream
+• volume_boundary_stream
+• event_boundary_stream
+• hybrid_boundary_stream
+• raw_minute_bars (Delta table files, read as a streaming source)
+• order_book (if needed for bid‐ask spread)
+
+For each boundary event:
+a. Find the latest “MinuteBar” or “OrderBook mid” at start_ts and at end_ts.
+b. Compute delta_value = log(P_end / P_start) for FX/equity or delta_value = S_end − S_start (in bps) for credit spreads.
+c. Assemble a row:
+
+yaml
+Copy
+Edit
+{
+  entity_id: “US_HY_2045_10y”,
+  clock_type: “event”,
+  slot_id: “evt_CPI_post_30”,
+  start_ts: “2025-06-01T08:30:00Z”,
+  end_ts:   “2025-06-01T09:00:00Z”,
+  delta_value: 5.2,      # e.g. credit spread widened by 5.2 bps
+  context: { "event_id":"CPI_2025-06-01-08:30", "window":"post_0_30" }
+}
+d. Write into Delta (streaming append) at
+delta://features/slot_returns/clock_type=<calendar|volume|event|hybrid>/date=<YYYY-MM-DD>/
+
+Partitioning:
+– Partition by (clock_type, DATE(end_ts)) so you can query by date or by clock_type quickly.
+
+Covered Use Cases:
+• A1–A5: “slot_returns” feed the historical “z-spread” changes bucketed by sector/rating/maturity.
+• A9, A10, A12, A18, D4, D5, E3, F2, G1, H1–H4, I1–I5, J4, J5: all need these “delta_value” time slices, whether calendar/volume/event/hybrid.
+• A2, A7, A13, B1–B5: may also read raw “curve levels” (another feature table), but follow identical logic.
+
+4. Real-Time Z-Score & Alerts
+Job: src/streaming/zscore_alert.py (PySpark Structured Streaming)
+
+Reads newly appended rows from delta://features/slot_returns/ (all four clock_types).
+
+Groups by (entity_id, clock_type, slot_id) into micro-batches (e.g., every 1 minute), maintaining a sliding window of the last 252 values in PySpark’s state store.
+
+Computes
+
+cpp
+Copy
+Edit
+μ_t = rolling_mean( delta_value[ t−251 … t ] )  
+σ_t = rolling_std(  delta_value[ t−251 … t ] )  
+z_t = (delta_value_t − μ_t) / σ_t  
+If |z_t| > z_threshold (configurable per slot_id), emit a Redis key
+
+css
+Copy
+Edit
+SET current_signal:{entity_id}:{clock_type}:{slot_id}  
+    { "timestamp": <now>, "zscore": z_t, "direction": "long" or "short" }  
+Also upserts the same (entity_id, clock_type, slot_id, mean, σ, z) into the Delta table
+delta://signals/slot_seasonality/… for archival and batch analysis.
+
+Covered Use Cases:
+• Any strategy that needs a real-time “go long/go short” flag on extreme z, e.g.:
+• A1–A5 (credit curve extremes), A9 (macro factor sensitivity), A10/A12 (event reactions)
+• B1–B5 (equity/carry/factor PCA), C1–C8 (equity factor rotations, ML attribution)
+• D1–D9 (cross-asset correlations, TAA, ratio z-scores), … etc.
+• H1–H4, I1–I5 (intraday/regime/triplet signals).
+
+5. Batch Analytics (“Batch Jobs”)
+All remaining heavy-weight or historical analyses live here. Each is a separate PySpark script scheduled via Airflow/Cron/Kubernetes:
+
+Slot Seasonality Statistics (slot_seasonality_stats.py)
+
+Input: delta://features/slot_returns/ (all clock_types, all dates)
+
+Group-By: (entity_id, clock_type, slot_id)
+
+Compute:
+• mean_return = avg(delta_value)
+• stddev_return = stddev(delta_value)
+• N_obs = count(*)
+• t_stat = mean_return / (stddev_return/√N_obs)
+• hit_ratio = (#times sign(delta_value) == sign(mean_return)) / N_obs
+
+Write: Delta table delta://signals/slot_seasonality/… partitioned by (clock_type, slot_id).
+
+Supports H1, H2, H3, H4 (intraday seasonality), A1–A5, B4, D3, D5, etc.
+
+Event Impact Aggregator (event_impact_agg.py)
+
+Input: subset of features/slot_returns where clock_type='event'
+
+Group-By: (entity_id, event_id, relative_bucket)
+
+Compute:
+• avg_move = avg(delta_value)
+• avg_abs_move = avg(abs(delta_value))
+• t_stat = avg_move / (stddev(delta_value)/√count)
+• N_obs = count
+
+Write: Delta table delta://signals/event_impact/… partitioned by (event_id, relative_bucket).
+
+Supports: A10, A12–A18, D1, D4, E3, F2, … etc.
+
+Curve PCA & Residuals (curve_pca_analysis.py)
+
+Input: Delta raw/curve_levels/ (fields: date, maturity, yield)
+
+Pivot: build a matrix of (entity_id × maturities) for each date
+
+Compute PCA: first 3 PCs → reconstruct fair value → residual_j = actual_j − reconstructed_j
+
+Compute z-score of residual over rolling window
+
+Write: Delta signals/pca_residuals/… (entity_id, date, maturity, residual, z_score)
+
+Supports: A5, A7, A17, B1, B2, G1, G2
+
+Cross-Sectional Spread Analytics (cross_sectional_spread.py)
+
+Input: Delta raw/spreads_historical/ (fields: date, sector, rating, maturity, z_spread)
+
+Compute:
+• A1: historical percentiles, rolling_mean/std, indicator for >90th pct
+• A3: daily_IG_avg, daily_HY_avg → differential → compression/decompression signals
+• A4: regress corp_spread ∼ sovereign_yield by sector → β, residual_std → write to Delta
+
+Write: Delta signals/historical_spread_stats/…
+
+Supports: A1, A2, A3, A4
+
+Macro Factor Regression & Nowcast (macro_nowcast_regression.py)
+
+Input: Delta raw/economic_surprises/ + Delta raw/curve_levels/ or signals/growth_beat/
+
+Compute:
+• Growth Beat Index (PCA on surprise series) per country → z-score → “nowcast_data” table
+• Regress spread_change ∼ growth_beat_z, inflation_z, FX_return, oil_return → rolling betas
+
+Write: Delta signals/macro_factor_sensitivities/… and signals/nowcast_indices/…
+
+Supports: A9, A21, E1, E2, E4, E5, E6
+
+Equity Factor Rotation & Attribution (equity_factor_analysis.py)
+
+Input: Delta raw/equity_prices/, signals/factor_returns/
+
+Compute:
+• B1–B5: rolling Sharpe, volatility, live vs backtest comparison
+• C1: factor performance ranking and sector attribution
+• C2: live vs backtest performance cones
+• C3: portfolio look-through attribution by cluster
+• C4: SHAP/feature attribution for ML models (join model outputs from ml_predictions/ table)
+• C5: conditional performance by VIX regime → generate signals
+• C7–C8: information coefficient rolling, learning curve stability tests
+
+Write: Delta signals/equity_factor_signals/…, backtests/equity_factor/…
+
+Supports: B1–B5, C1–C8, F1–F4
+
+Cross-Asset & Multi-Asset Strategy Analytics (cross_asset_analysis.py)
+
+Input: Delta raw/strategy_pnl/ (CAT returns, commodity index returns, credit index returns, equity vol)
+
+Compute:
+• D1: 90-day rolling correlations between CAT and commodity index
+• D2: TAA backtest of active returns vs equal‐weight
+• D3: inter-asset ratio (SPX / Gold) → z-score → signals
+• D4: regress HY spread ∼ S&P vol, lead/lag correlation analysis
+• D5: intraday regime sensitivity (GSI threshold)
+• D6: CTA basket adjustment by macro (roll up from A21)
+• D7: stagflation quad performance (growth vs inflation)
+• D8: orthogonalize FX macro vs trend/carry → pure macro signals
+• D9: hierarchical regime + triplet + PCA combination → final positions
+
+Write: Delta signals/cross_asset_signals/…, backtests/cross_asset/…
+
+Supports: D1–D9, G1–G2
+
+Intraday Seasonality & Triplet Analysis (intraday_triplet.py, intraday_seasonality.py)
+
+Input: Delta features/slot_returns (calendar/volume slot returns), raw tick streams (for intraday sub-returns)
+
+Compute:
+• H1: t‐stats per hour per asset, multiple testing (Benjamini–Hochberg) → significant_hours
+• H2: transaction_cost breakeven (information_coefficient vs cost curves) → min_IC
+• H3: out-of-sample vs in-sample decomposed P/L → signal vs cost decay
+• H4: execution_delay ∼ return_impact regression → latency requirements
+• I1–I2: triplet (past-vantage-future) correlation by hour; find optimal lags & vantage times
+• I3: cross-market first–reaction regression (e.g. US → DAX next-day)
+• I4: dynamic signal type mix (momentum vs reversal proportion) by date
+• I5: crisis period performance ROLLUP for volatility regimes
+
+Write: Delta signals/intraday_seasonality/…, signals/triplet_patterns/…, backtests/intraday/…
+
+Supports: H1–H4, I1–I5
+
+Portfolio Construction & Risk Mgmt (portfolio_risk.py, turnover_optimization.py, cppi_sensitivity.py, risk_parity.py, adaptive_weights.py)
+
+Input: Delta raw/portfolio_holdings/, backtests/* for performance metrics, market risk factors
+
+Compute:
+• J1: turnover constraint vs net Sharpe curves → optimal turnover
+• J2: compute pairwise strategy correlations → diversification benefits → optimal mix
+• J3: CPPI backtests over varying drawdown limits → return/risk tradeoff
+• J4: compare HRP vs equal-weight → Sharpe & drawdown differences → regime-dependent best
+• J5: adaptive weight evolution, volatility of weights, performance consistency → dynamic allocation
+
+Write: Delta signals/portfolio_signals/…, backtests/portfolio/…
+
+Supports: J1–J5
+
+6. Metadata & Configuration
+PostgreSQL (public schema)
+• instruments (entity_id → asset_class, sector, region, currency, etc.)
+• slot_metadata (slot_id → clock_type, params, description)
+• macro_calendar (event_id → event_ts, type, impact_score)
+• [plus any look-up tables: sector_rating_buckets, maturity_buckets, credit_index_members]
+
+Delta Lake
+• raw/market_ticks/…, raw/order_book/…, raw/curve_levels/…, raw/macro_events/…
+• features/slot_returns/…
+• signals/slot_seasonality/…, signals/event_impact/…, signals/pca_residuals/…, signals/primary_signals/…
+• backtests/{use_case}/…
+
+Redis
+• current_signal:{entity_id}:{clock_type}:{slot_id} → latest zscore alert (low-latency)
+• live_backtest_stats:{strategy_id} → running P/L, drawdown, position sizes (for the Dash “live P/L” widget)
+
+config files (in configs/) are all YAML and plain text:
+• calendar_slots.yaml, volume_slots.yaml, event_slots.yaml, hybrid_slots.yaml
+• spark-defaults.conf (defines executors, memory, shuffle partitions)
+• Dockerfile.spark (build PySpark container)
+• Dockerfile.dash (build Dash + PySpark client container)
+• k8s/ manifests for each service.
+
+7. Dash UI Layer (User Layer)
+All final outputs and interactive visualizations are built in a single Dash application (src/dashboard_app/). It has:
+
+Curve & Spread Dashboards
+• A1: “Historical Curve Positioning” page
+– Query Delta signals/slot_seasonality (clock_type=calendar, slot_id=”cal_midday” etc.) to show current z‐spread percentiles vs historical.
+– Interactive: choose sector + rating + maturity bucket, plot time series of z.
+• A2: “Curve Slope vs History” page
+– Query Delta raw/curve_levels + Delta signals/pca_residuals to display current 2s–10s, 5s–30s slopes vs historical mean ± σ.
+• A3: “IG vs HY Compression”
+– Pull batch result from signals/historical_spread_stats to highlight compression periods.
+• A4: “Country vs Corporate Spread Influence”
+– Show rolling correlation and β from Delta signals/historical_spread_stats.
+• A5: “PCA-Implied Fair Value”
+– Heatmap of residual z-scores per bond from signals/pca_residuals.
+
+Also pages for A9, A10, A12–A18 showing event windows and advanced diagnostics.
+
+Cross-Asset & Macro Dashboards
+• A19: “Intraday Macro Shock Propagation”
+– Fetch from signals/event_impact (clock_type=event) and raw tick time series to show first‐reaction times by asset.
+• A20: “Vol Surface Sentiment Regression”
+– Query signals/primary_signals where signal_type=“vol_sentiment”; plot performance.
+• A21: “Nowcast-Based Exposure Timing”
+– Pull signals/nowcast_indices + signals/primary_signals, show dynamic weights.
+
+Equity & Quant Strategy Dashboards
+• B1–B5, C1–C8
+– “Factor Rotation” page: select factor, see rolling Sharpe, sector exposures.
+– “Live vs Backtest” cones: plot backtest distribution vs live from backtests/equity_factor.
+– “Portfolio Attribution”: stacked area charts of trend, carry, value.
+– “ML Attribution”: bar charts of SHAP contributions from signals/factor_shap/.
+
+Cross-Asset & Multi-Asset
+• D1: Rolling correlation widget (CAT vs BCOM)
+• D2: TAA Active Return table vs equal-weight
+• D3: Inter-Asset Ratio z-score heatmap
+• D4: “Credit vs Equity Vol Lead/Lag” scatter plot of β vs lag
+• D5: “Intraday Regime Sensitivity” (GSI)
+• D6: “CTA Macro Overlay” time series of weights
+• D7: “Stagflation Quadrant” bar chart of commodity vs TIPS returns by quadrant
+• D8: “FX Macro Orthogonalization” scatter (pure_macro vs trend)
+• D9: “Hierarchical Regime Allocation” treemap of strategy mix
+
+Intraday Seasonality & Triplet
+• H1: Grid of statistically significant hours per asset (H1)
+• H2: Table showing min IC vs cost breakeven (H2)
+• H3: Decomposition view (in-sample vs out-of-sample) – stacked bars of signal vs cost decay
+• H4: Execution Delay Sensitivity curve
+• I1: Triplet “Heatmap”: vantage vs lag vs target correlation (3D pivot)
+• I2: “Information Content by Hour” bar chart of average IC
+• I3: “Cross-Market Spillover” time series of USβ → DAX next‐day
+• I4: “Signal Mix Over Time” line chart of momentum_proportion vs reversal_proportion
+• I5: “Crisis Performance Analysis” event dropdown (COVID, VIX, GFC)
+
+Portfolio Construction & Risk Mgmt
+• J1: “Turnover vs Sharpe” interactive slider: see net Sharpe by turnover constraint
+• J2: “Diversification Benefit” scatter of strategy pairs correlation vs synergy
+• J3: “CPPI Parameter Sensitivity” table of limits vs return/drawdown
+• J4: “Risk Parity Comparison” radar chart of HRP vs EW per regime
+• J5: “Adaptive Weight Evolution” time series of static vs dynamic weight
+
+Dash callbacks will read directly from Delta (via pyspark.sql.read.format("delta")) or DuckDB (for sub-second queries of small slices) for batch tables, and from Redis for any low-latency “live_signal” fields.
+
