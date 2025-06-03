@@ -1,0 +1,189 @@
+                                            ┌──────────────────────┐
+                                            │   External Data      │
+                                            │   ───────────────     │
+                                            │  • Market tick feeds │
+                                            │  • Intra-day quotes  │
+                                            │  • Daily end-of-day  │
+                                            │  • Macroeconomic     │
+                                            │    calendars & news  │
+                                            └─────────┬────────────┘
+                                                      │
+                                                      │  (1) Raw ingestion via
+                                                      │      PySpark Structured
+                                                      │      Streaming + Kafka
+                                                      ▼
+                             ┌─────────────────────────────────────────────┐
+                             │            “Ingestion Layer”               │
+                             │  • PySpark Streaming Jobs (Kafka → Spark)   │
+                             │    – tick_aggregator.py                    │
+                             │    – order_book_builder.py                 │
+                             │    – macro_event_marker.py                 │
+                             │  • Writes raw “MinuteBars” & “QuoteBars”   │
+                             │    to Delta tables under:                  │
+                             │    └─ delta://raw/market_ticks/            │
+                             │    └─ delta://raw/order_book/             │
+                             │    └─ delta://raw/macro_events/            │
+                             └──────────┬──────────────────────────────────┘
+                                        │
+                                        │  (2) Two parallel paths:
+                                        │      • Real-time (streaming)
+                                        │      • Historical batch
+                                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          “Event & Slot Manager”                             │
+│  – Python module “clock_manager.py” loads YAML definitions of:               │
+│     • calendar_slots.yaml  (e.g. hourly, session‐based)                      │
+│     • volume_slots.yaml    (e.g. first $X notional traded, or X ticks)        │
+│     • event_slots.yaml     (e.g. CPI, FOMC, NFP windows)                      │
+│     • hybrid_slots.yaml    (e.g. volume buckets that only open post-event)    │
+│                                                                              │
+│  – Handles alignment to three “clocks”:                                      │
+│     1. **Calendar Clock:** emits a “slot_start” notification at each hour/min │
+│     2. **Volume Clock:** accumulates “tick” volumes in Spark state; once the  │
+│        threshold is reached, emits “volume_slot_boundary”                     │
+│     3. **Event Clock:** reads macro_events (Delta) and emits “pre”/“post”    │
+│        windows around each release                                                │
+│  – Hybrid: “blockedUntil” logic (Python) that waits (post_event_delay) then  │
+│        activates a volume slot                                                 │
+│                                                                              │
+│  ┌───────────┐   ┌───────────────┐   ┌──────────────┐   ┌───────────────┐     │
+│  │calendar   │   │ volume       │   │ event       │   │ hybrid        │     │
+│  │  slots    │   │  slots       │   │  slots      │   │  slots        │     │
+│  └────┬──────┘   └─────┬─────────┘   └─────┬───────┘   └─────┬─────────┘     │
+│       │                │                  │                  │               │
+│       ▼                ▼                  ▼                  ▼               │
+│  “calendar_boundary”  “volume_boundary”  “event_boundary”  “hybrid_boundary”  │
+└──────────┬───────────┬─────────────┬───────────────┬──────────────────────────┘
+           │           │             │               │
+           │           │             │               │
+           │           │             │               │
+           ▼           ▼             ▼               ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                   “Streaming Feature Compute”                     │
+│  (PySpark Structured Streaming jobs consume the four boundary      │
+│   streams above plus raw ticks/prices and produce “slot_returns”)  │
+│                                                                   │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │  streaming_slots.py  – for each “boundary event”:           │  │
+│  │     • join boundary timestamp to nearest “MinuteBar”        │  │
+│  │     • compute Δspread or log‐return between slot start/end  │  │
+│  │     • assemble a row:                                       │  │
+│  │       { entity_id, clock_type, slot_id, start_ts, end_ts,    │  │
+│  │         delta_value, context_JSON }                          │  │
+│  │     • write to Delta “features.slot_returns”                │  │
+│  └─────────────────────────────────────────────────────────────┘  │
+│                                                                   │
+│  Output (continuous writes) → Delta table:                         │
+│    delta://features/slot_returns/ (partitioned by clock_type, date)│
+└───────────────────────────────────────────────────────────────────┘
+           │
+           │
+           │   (3) Secondary real-time jobs “on top of” slot_returns:
+           ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                 “Real-Time Signal & Z-Score”                     │
+│  – PySpark Structured Streaming job “zscore_alert.py”:            │
+│     • Reads feature rows from “slot_returns” as they arrive        │
+│     • Maintains rolling window (e.g. last 252 observations) in     │
+│       in-memory state per (entity_id, clock_type, slot_id)         │
+│     • Computes z = (delta_value – μ)/σ. If |z| > threshold,         │
+│       writes a “signal” record to Redis for low-latency access     │
+│  – The same job can also compute hit_ratio, t-stats, etc. in        │
+│    mini‐batches and upsert those into Delta “signals.slot_seasonality”│
+│                                                                   │
+│  Output:                                                           │
+│    • Redis hashes “current_signal:{entity_id}:{clock_type}:{slot_id}”│
+│    • Delta table “signals.slot_seasonality” (for later dashboard)  │
+└───────────────────────────────────────────────────────────────────┘
+           │
+           │
+           │
+           ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                       “Batch Analytics”                          │
+│  PySpark Batch Jobs scheduled nightly (or hourly/day) to compute: │
+│                                                                   │
+│  1. **Slot Seasonality Stats** (compute mean, std, t-stat, hit-ratio) │
+│     – Input: Delta “features.slot_returns” (all clock_types)        │
+│     – Output: Delta “signals.slot_seasonality”                       │
+│                                                                   │
+│  2. **Event Impact Aggregation**                                     │
+│     – Input: Delta “features.slot_returns” filtered where clock_type=event │
+│     – Output: Delta “signals.event_impact”                            │
+│                                                                   │
+│  3. **Historical Backtests & Strategy Metrics**                      │
+│     – For each use case (A1–D9, etc.), a separate PySpark job:        │
+│       • Reads the relevant feature/signal tables                     │
+│       • Simulates P/L, computes Sharpe, drawdowns, turnover, etc.     │
+│       • Writes results to Delta “backtests/{use_case}”                │
+│                                                                   │
+│  4. **Cross-Sectional & PCA-Based Analytics**                         │
+│     – Jobs like “curve_pca_analysis.py,” “credit_factor_sensitivity.py,” │
+│       “macro_nowcast_regression.py,” etc.                            │
+│     – Each outputs its signals (e.g. PCA residuals, factor betas)     │
+│       to Delta “signals.primary_signals” or specialized tables         │
+│                                                                   │
+│  All batch jobs read & write solely to Delta (S3/HDFS).               │
+└───────────────────────────────────────────────────────────────────┘
+           │
+           │
+           ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                    “Metadata & Configuration”                     │
+│                                                                   │
+│  • PostgreSQL (metadata):                                         │
+│     – public.instruments  (list of entity_id → asset_class, sector,  │
+│       region, currency)                                            │
+│     – public.slot_metadata  (slot_id → clock_type, params, YAML)    │
+│     – public.macro_calendar  (event_id → timestamp, type, impact)   │
+│                                                                     │
+│  • Redis (low-latency state):                                      │
+│     – “current_signal:…”  (most recent z > threshold signals)       │
+│     – “live_backtest_stats”   (rolling P/L, drawdown, utilization)  │
+│                                                                     │
+│  • Delta Lake (on S3 or HDFS):                                     │
+│     – Raw feeds: “delta://raw/market_ticks/…”                       │
+│     – features: “delta://features/slot_returns/…”                   │
+│     – signals: “delta://signals/slot_seasonality/…”,                 │
+│       “delta://signals/event_impact/…”, “delta://signals/primary_signals/…”  │
+│     – backtests: “delta://backtests/{use_case}/*”                   │
+└───────────────────────────────────────────────────────────────────┘
+           │
+           │
+           ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                         “Dash UI Layer”                          │
+│                                                                   │
+│  • “Dash App” (Python) that serves as the **User Layer**:         │
+│    – **Curve & Spread Dashboards**:                               │
+│         • A1, A2, A3, A4, A5, A7, A9, A10, A12, A13, A14, A15, A16, A17, A18 │
+│         • Pull from Delta (via PyArrow/DuckDB or Spark connectors) │
+│         • Interactive filters: sector, rating bucket, maturity, etc │
+│                                                                   │
+│    – **Cross-Asset & Macro Dashboards**:                          │
+│         • A19, A20, A21, E1, E2, E3, E4, E5, E6                   │
+│         • Show time-series of factor betas, nowcast indices, etc   │
+│                                                                   │
+│    – **Equity & Quant Strategy Dashboards**:                      │
+│         • B1, B2, B3, B4, B5, C1, C2, C3, C4, C5, C6, C7, C8      │
+│         • Factor rotation visualizations, live vs backtest cones,  │
+│           SHAP attribution charts, learning curve plots            │
+│                                                                   │
+│    – **Intraday Seasonality & Triplet Dashboards**:               │
+│         • H1, H2, H3, H4, I1, I2, I3, I4, I5                      │
+│         • Heatmaps of “hour vs mean_return,” “lag-target” triplet   │
+│           correlation matrices, execution-delay sensitivity tables │
+│                                                                   │
+│    – **Portfolio & Risk Management Dashboards**:                  │
+│         • D1, D2, D3, D4, D5, D6, D7, D8, D9, J1, J2, J3, J4, J5   │
+│         • Correlation matrices, TAA performance vs benchmark,      │
+│           turnover-vs-cost curves, risk parity comparisons          │
+│                                                                   │
+│  • Dash callbacks fetch from Delta (PySpark or DuckDB) + Redis.    │
+│  • Users can click on any “signal” row to drill into backtest P/L. │
+│  • All UI code lives under: `src/dashboard_app/`                    │
+│                                                                   │
+│  • Deployment:                                                       │
+│      – Dockerfile.dash → container with Dash server & PySpark client │
+│      – Kubernetes (configs/k8s/dash_deployment.yaml)                 │
+└───────────────────────────────────────────────────────────────────┘
