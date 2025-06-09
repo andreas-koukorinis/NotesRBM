@@ -1,0 +1,102 @@
+1. Data Ingestion Layer
+Purpose: To connect to various external and internal data sources and load raw data into the system.
+Responsibilities:
+Connectors for data vendors (e.g., Bloomberg API for prices, options; specific APIs for economic forecasts).
+Readers for static files (CSV, Parquet) for index constituents, ETF holdings.
+Database connectors (SQL) for internal data stores.
+Implementation: A collection of Python scripts or services, each dedicated to a specific source. Data is landed in a "raw data lake" (e.g., AWS S3 bucket) with metadata (source, timestamp).
+3.2. Data Management Layer
+Purpose: To clean, standardize, align, and provide a unified query interface for all data.
+Responsibilities:
+Cleaning & Validation: Handle missing values (e.g., fillna(0) as seen in the Python code), correct for splits/dividends, and validate data integrity.
+Standardization: Standardize economic surprises as described in full_signal_design_cleaned.tex.
+Time Series Alignment: Align data of different frequencies (e.g., daily prices, quarterly economic data) onto a common timeline.
+Data API / Feature Store: Provide a single, consistent API for all other modules to access data. For example: data_api.get_prices(tickers, start_date, end_date) or data_api.get_economic_surprises('USA', 'growth').
+Implementation:
+Uses libraries like pandas and numpy for manipulation.
+Cleaned, analysis-ready data is stored in an efficient format like Parquet or a time-series database (e.g., InfluxDB, TimescaleDB).
+3.3. Alpha Signal Framework
+Purpose: To implement the mathematical and statistical logic for generating trading signals from data. This is the core of the "Signal Design and Mathematics" section.
+Responsibilities:
+Provide a base Signal class that all specific signal implementations must inherit from.
+Implement signal generation logic as described in the documents.
+Implementation:
+A base class defines the interface:
+python
+
+Run
+
+Copy
+from abc import ABC, abstractmethod
+import pandas as pd
+
+class BaseSignal(ABC):
+    def __init__(self, data_api, params):
+        self.data_api = data_api
+        self.params = params
+
+    @abstractmethod
+    def compute(self, universe, start_date, end_date) -> pd.DataFrame:
+        """
+        Computes the signal for a given universe of assets over a date range.
+        Returns a DataFrame with index=date, columns=assets, values=signal_strength.
+        """
+        pass
+Concrete Implementations based on documents:
+MacroNowcastSignal(BaseSignal): Implements the PCA-based beat/surprise index and rolling z-score logic from full_signal_design_cleaned.tex.
+GrangerCausalitySignal(BaseSignal): Implements the vector autoregression model from signal_design.tex to test for causality and generate signals if the F-test is significant.
+ETFFlowSignal(BaseSignal): Implements the flow calculation described in the Deutsche Bank paper, decomposing it into allocation, weight, and index reconstitution components.
+MomentumSignal(BaseSignal), MeanReversionSignal(BaseSignal), etc.
+3.4. Portfolio Construction & Backtesting Engine
+Purpose: To simulate a strategy's performance over time based on the signals.
+Responsibilities:
+Portfolio Construction:
+Take signal DataFrames as input.
+Implement sorting and quantile logic (e.g., "sort Russell 3000 stocks into ten equal groups").
+Apply weighting schemes (equal-weight, dollar-neutral, market-cap).
+Handle constraints (sector neutrality, turnover limits).
+Event-Driven Backtester:
+Iterates through time (e.g., daily).
+On each time step, it:
+Updates the market value of the current portfolio.
+Checks if it's a rebalancing day.
+If rebalancing, it calls the Portfolio Construction module to get the new target portfolio.
+Calculates required trades (current portfolio vs. target portfolio).
+Simulates trades, accounting for transaction costs and potential slippage.
+Records the new portfolio state, P&L, and other metrics for that day.
+Implementation:
+A Backtester class that takes a strategy configuration (signal, rebalancing frequency, construction rules) as input.
+Popular open-source libraries like Zipline-reloaded or Backtrader can be used as a foundation, or a custom engine can be built for more control.
+3.5. Performance Analytics Module
+Purpose: To calculate and visualize the performance of a backtest.
+Responsibilities:
+Calculate standard metrics: Annualized Return, Volatility, Sharpe Ratio, Max Drawdown, Calmar Ratio.
+Generate plots as seen in the DB paper:
+Growth of wealth (cumulative returns).
+Decile performance bar charts (Figure 1, Figure 9).
+Decomposition plots (Figure 3, Figure 4).
+Implement advanced analytics from the documents:
+Macro Factor Attribution: Decompose P&L based on exposure to macro factors.
+Signal Decay Analysis: Measure how quickly the predictive power of a signal fades.
+Implementation: Uses libraries like pyfolio-reloaded, matplotlib, seaborn, and plotly for calculations and visualizations.
+3.6. Job Orchestration & Scheduling
+Purpose: To manage and automate the entire pipeline, from data ingestion to generating final reports.
+Responsibilities:
+Define workflows as Directed Acyclic Graphs (DAGs).
+Schedule routine jobs (e.g., daily data ingestion, weekly signal recalculation).
+Manage dependencies (e.g., don't run signal calculation until data ingestion is complete).
+Handle retries and failure notifications.
+Implementation: Apache Airflow is the industry standard for this.
+3.7. User Interface & Reporting
+Purpose: To provide an interactive environment for researchers to work and to present final results.
+Responsibilities:
+Research Environment: Provide an interactive environment for developing new signals and performing exploratory analysis.
+Reporting: Display backtest results, charts, and key metrics in a clear, shareable format.
+Implementation:
+JupyterLab/Notebooks: The primary interface for researchers. They can use the framework's APIs to access data, design signals, and run backtests.
+Web Dashboard (e.g., using Dash or Streamlit): A web application to display a leaderboard of strategies, monitor scheduled jobs, and present polished reports to portfolio managers or stakeholders.
+4. Workflow Example: Replicating the "ETF Contraflow" Strategy
+Orchestration (Airflow): A daily DAG is triggered.
+Data Ingestion: The DAG runs jobs to fetch the latest ETF holdings, stock prices, and market cap data.
+Data Management: The data is cleaned, aligned, and stored. The Data API can now serve this data.
+Signal Calculation: A researcher (or an automated job) uses the framework
