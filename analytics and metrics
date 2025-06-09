@@ -1,0 +1,18 @@
+import pandas as pd
+
+class PerformanceAnalytics:
+    def __init__(self, pnl_series: pd.Series, signal_df: pd.DataFrame):
+        self.pnl = pnl_series
+        self.signal = signal_df
+
+    def compute_metrics(self) -> dict:
+        """Sharpe, max drawdown, turnover, IC, etc."""
+        raise NotImplementedError
+
+    def plot_cumulative_returns(self):
+        """Matplotlib code to plot self.pnl.cumsum()."""
+        raise NotImplementedError
+
+    def plot_decile_performance(self):
+        """Generate bar chart of decile returns."""
+        raise NotImplementedError
