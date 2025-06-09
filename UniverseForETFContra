@@ -1,0 +1,38 @@
+# In a new module, e.g., framework.universe.provider
+import pandas as pd
+from framework.data import DataAPI
+
+class UniverseProvider:
+    """
+    Defines the universe of assets and their metadata for any given date.
+    """
+    def __init__(self, data_api: DataAPI, universe_name: str):
+        """
+        Args:
+            data_api: The framework's data API.
+            universe_name: e.g., 'US_IG_Bonds', 'Russell_3000'
+        """
+        self.data_api = data_api
+        self.universe_name = universe_name
+        self._cache = {} # Simple cache to avoid re-fetching data
+
+    def get_universe_with_metadata(self, date) -> pd.DataFrame:
+        """
+        Returns a DataFrame containing all assets in the universe for a given date,
+        along with their relevant metadata. This handles point-in-time correctness.
+        
+        For a bond universe, this would query for all bonds that existed and were
+        in the index on that date, and get their ratings/sectors *as of that date*.
+
+        Returns:
+            pd.DataFrame with index='identifier' and columns=['rating', 'sector', ...]
+        """
+        date_key = date.strftime('%Y-%m-%d')
+        if date_key in self._cache:
+            return self._cache[date_key]
+
+        # This method in the DataAPI would query a point-in-time database
+        # for universe constituents and their attributes.
+        universe_df = self.data_api.get_universe_constituents(self.universe_name, date)
+        self._cache[date_key] = universe_df
+        return universe_df
