@@ -1,0 +1,29 @@
++-------------------------------------------------------------------------+
+|    [7] User Interface & Reporting (Jupyter Notebooks, Web Dashboard)    |
++-------------------------------------------------------------------------+
+       ^                         ^                         ^
+       | API Calls               | API Calls               |
++--------------------------+-------------------------+--------------------+
+| [4] Performance          | [5] Portfolio           | [6] Job            |
+|     Analytics Module     |     Construction &      |     Orchestration  |
+| (Sharpe, Drawdown,       |     Backtesting Engine  |     & Scheduling   |
+|  Attribution, Plots)     | (Event-Driven)          | (e.g., Airflow)    |
++--------------------------+-------------------------+--------------------+
+       ^                         ^
+       | Consumes Signals        | Uses Asset Universe
++-------------------------------------------------------------------------+
+|                  [3] Alpha Signal Framework                             |
+| (BaseSignal Class, PCA, Granger, Momentum, ML Models, etc.)             |
++-------------------------------------------------------------------------+
+       ^
+       | Consumes Cleaned Data
++-------------------------------------------------------------------------+
+|                  [2] Data Management Layer                              |
+| (Data API, Feature Store, Data Cleaning & Standardization)              |
++-------------------------------------------------------------------------+
+       ^
+       | Ingests Raw Data
++-------------------------------------------------------------------------+
+|                  [1] Data Ingestion Layer                               |
+| (Connectors to Bloomberg, Reuters, Flat Files, APIs, DBs)               |
++-------------------------------------------------------------------------+
