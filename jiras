@@ -1,0 +1,134 @@
+Below is a set of suggested JIRA issues—organized as a single Epic (“MVP Signal Platform”) with individual Stories/Tasks. You can adjust keys to match your project’s naming convention.
+
+EPIC: MVP Signal Platform
+Key: PLAT-1
+Summary: Stand up a minimal, end-to-end signal framework MVP (ETF & ETF-flow)
+Description:
+Deliver a minimal viable product that ingests historical ETF holdings & price data, computes the six-month ETF-flow signal, runs a backtest, and produces basic performance analytics. This Epic covers project scaffolding, ingestion, data modeling, time-series provider, signal implementation, backtester, analytics, configuration, and the master pipeline runner.
+
+Story: Project Scaffolding
+Key: PLAT-2
+Summary: Initialize monorepo structure and base classes
+Description:
+Create the repository layout with these modules:
+
+data_ingest/
+
+data_model/
+
+time_series_provider/
+
+signals/
+
+backtest/
+
+analytics/
+
+config/
+
+run_pipeline.py
+
+Also add:
+
+A central YAML config loader
+
+The abstract BaseSignal class stub
+
+A placeholder requirements.txt / setup.py
+
+Story: Offline Data Ingestion
+Key: PLAT-3
+Summary: Implement RawDataIngestor to pull ETF holdings & price history
+Description:
+In data_ingest.py, add RawDataIngestor methods:
+
+fetch_etf_holdings(date_range) → download ETF holdings CSVs to raw directory
+
+fetch_price_history(tickers, date_range) → download price history CSVs
+
+run_all(date_range) orchestrator
+
+Write minimal unit tests verifying files land in the raw lake.
+
+Story: Parquet Data Store
+Key: PLAT-4
+Summary: Build ParquetStore for cleaned data read/write
+Description:
+In data_model.py, create ParquetStore with two methods:
+
+read(dataset: str, date: str) -> pd.DataFrame
+
+write(dataset: str, df: pd.DataFrame, date: str)
+
+Verify that reading/writing round-trips a small toy DataFrame in tests.
+
+Story: TimeSeriesProvider Stub
+Key: PLAT-5
+Summary: Implement TimeSeriesProvider to serve DataFrames from Parquet
+Description:
+In time_series_provider.py, create TimeSeriesProvider(store: ParquetStore) with:
+
+get_prices(tickers, start_date, end_date)
+
+get_etf_holdings(etfs, start_date, end_date)
+
+Stub out logic to read Parquet and pivot into wide/tidy DataFrames. Add a unit test for date alignment.
+
+Story: ETF-Flow Signal Class
+Key: PLAT-6
+Summary: Develop ETFFlowSignal under signals.py
+Description:
+Subclass BaseSignal:
+
+Fetch six-month AUM series and market caps via ts_provider
+
+Compute ΔAUM / mcap, cross-section decile rank by sector
+
+Return +1/−1 equal-weight DataFrame, dollar-neutralized
+Add synthetic-data unit tests to validate ranking and neutrality.
+
+Story: PortfolioConstructor & Backtester
+Key: PLAT-7
+Summary: Create portfolio construction and backtest engine
+Description:
+In backtester.py implement:
+
+PortfolioConstructor.build_positions(signal_df) → apply caps, rebalance schedule
+
+Backtester.run(signal_df) → loop through time, simulate PnL with fixed slippage
+
+Smoke-test on the full history and output a PnL timeseries CSV.
+
+Story: Performance Analytics Module
+Key: PLAT-8
+Summary: Build PerformanceAnalytics for basic metrics and plots
+Description:
+In analytics.py, add methods:
+
+compute_metrics() → returns Sharpe, max drawdown, turnover
+
+plot_cumulative_returns() → matplotlib cumulative return chart
+
+plot_decile_performance() → bar chart of decile returns
+
+Demonstrate in a Jupyter notebook.
+
+Story: Config & Pipeline Runner
+Key: PLAT-9
+Summary: Wire everything together in run_pipeline.py
+Description:
+
+Load config/signals.yaml for date_range, universe, backtest params
+
+Instantiate RawDataIngestor → clean data
+
+Instantiate ParquetStore + TimeSeriesProvider
+
+Run ETFFlowSignal.compute(...) to get sig_df
+
+Run Backtester → get pnl
+
+Run PerformanceAnalytics → print metrics & show plot
+
+Validate end-to-end execution completes without errors.
+
