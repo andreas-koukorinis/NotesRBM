@@ -1,0 +1,146 @@
+Here’s a 5-sprint plan (2–3 weeks each) that gets you to a working MVP of the ETF and ETF-flow strategies first—focusing on signal logic, backtest, and analytics—then peels off the API/service work in a final “scale” sprint.
+
+Sprint 1: Core Data & Framework Foundations
+Goal: Stand up your repo structure, ingestion scripts, data models, and the bare-bones signal framework so you can plug in your first signals without any microservices or APIs.
+
+Tasks:
+
+Project scaffolding
+
+Monorepo with modules: data_ingest/, data_model/, signals/, backtest/, analytics/, config/.
+
+BaseSignal abstract class & project-wide config loader (YAML).
+
+Offline data ingestion
+
+Scripts to pull/download historical ETF holdings (CSV/Parquet) and price history for Russell 3000.
+
+Normalize & write “clean” Parquet tables: etf_holdings/DATE.parquet, prices/DATE.parquet.
+
+Local TimeSeriesProvider stub
+
+A class that reads Parquet, aligns dates, and hands back a DataFrame.
+
+Write basic unit tests to confirm it returns correct shapes.
+
+Deliverable:
+
+Repo with ingest scripts, cleaned data snapshots, and a stubbed TSProvider you can import in your signal code.
+
+Sprint 2: ETF-Flow Signal Implementation
+Goal: Build, test, and validate your ETFFlowSignal end-to-end—no API or microservice yet, just pure-Python compute.
+
+Tasks:
+
+Implement ETFFlowSignal(BaseSignal)
+
+Six-month AUM delta / market-cap logic
+
+Sector‐neutral decile ranking, +1/–1 equal-weight output.
+
+Unit‐tests / Synthetic data
+
+Create small toy DataFrames to confirm ranking, weighting, and neutrality.
+
+Integrate into pipeline
+
+Hook ETFFlowSignal into a simple signal‐processor script:
+
+bash
+Copy
+Edit
+python run_signal.py --signal ETFFlow --start 2015-01 --end 2020-12
+Outputs a file signals/etfflow.parquet.
+
+Deliverable:
+
+Fully tested ETFFlowSignal class and standalone runner that emits a signal series.
+
+Sprint 3: Basic Backtester & Portfolio Construction
+Goal: Wire your ETFFlowSignal into a backtest engine, generate returns, and sanity-check performance.
+
+Tasks:
+
+Backtester skeleton
+
+Daily/monthly loop that:
+
+Loads signal DataFrame
+
+Applies target weights (±1 legs, dollar‐neutral)
+
+Simulates PnL with fixed slippage & transaction-cost model
+
+PortfolioConstructor
+
+Enforce position caps, rebalancing schedule.
+
+Smoke tests
+
+Run a full-history backtest, inspect annualized return & turnover.
+
+Deliverable:
+
+A backtest report with PnL timeseries and basic metrics (Sharpe, drawdown).
+
+Sprint 4: Performance Analytics & Reporting MVP
+Goal: Build the first analytics notebooks and minimal dashboard so stakeholders can see strategy performance and decile results.
+
+Tasks:
+
+Analytics module
+
+Compute: IC, annualized return, volatility, max drawdown, turnover.
+
+Generate: cumulative return chart, decile barplots.
+
+Jupyter notebook
+
+Parameter controls for flow window, sector grouping.
+
+Plots embedded with Markdown commentary.
+
+Lightweight dashboard (optional)
+
+Streamlit app showing PnL chart + signal heatmap.
+
+Deliverable:
+
+etf_flow_analysis.ipynb and a one-page Streamlit dashboard.
+
+Sprint 5: Scale-Up & Service/API Extraction
+Goal: Refactor your MVP into services and extract the DataAPI/TSProvider, so you can add more signals (and users!) without rewriting ingestion logic.
+
+Tasks:
+
+Extract DataAPI microservice
+
+Wrap your Parquet reader in a simple Flask/FastAPI app with endpoints like /prices, /etf_holdings.
+
+Refactor TSProvider to call DataAPI
+
+Containerize
+
+Dockerfiles for DataAPI, TSProvider, and a signal-worker image.
+
+Update ETFFlowSignal to use injected API client
+
+Deliverable:
+
+Dockerized DataAPI + TSProvider + signal worker, orchestrated by Docker-Compose or Kubernetes manifest.
+
+Why This Sequence?
+You front-load the high-value signal logic and backtest so you can validate your strategy before investing in infrastructure.
+
+You then peel off the API and service layer once the compute correctness is proven, ensuring your MVP stays lean.
+
+With DataAPI/TSProvider in place, adding new signals (e.g. price‐momentum, fundamental models) in future sprints becomes trivial.
+
+Feel free to adjust sprint lengths or shift tasks based on team size and priorities, but this roadmap will get you to a working ETF-flow MVP in ~8 – 10 weeks, with scalable services ready thereafter.
+
+
+
+
+
+
+
