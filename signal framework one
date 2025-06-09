@@ -1,0 +1,122 @@
+Below is a high-level software-engineering abstraction of the various “signal” strategies (ETF contraflow, arbitrage-comovement, factor rotation, stock selection, etc.) into a unified, modular framework. Think of it as the blueprint for a signal-generation engine that can be extended easily as you add new strategies.
+
+---
+
+## 1. Layered Architecture
+
+1. **Ingestion Layer**
+
+   * **Purpose:** Connects to live and historical data sources (market data, ETF flows, factor returns).
+   * **Components:**
+
+     * *Data Connectors* (e.g. Kafka consumers, REST clients)
+     * *Adapters* to normalize raw feeds into a common `TimeSeries` or `Event` format (Adapter pattern).
+
+2. **Pre-Processing Layer**
+
+   * **Purpose:** Cleans, filters, and caches data for downstream use.
+   * **Components:**
+
+     * *Normalization Service* (e.g. z-score, winsorization)
+     * *Feature Builder* (e.g. rolling volatility, flow decomposition into allocation/index/weight )
+     * *Caching/Storage* (Redis, in-memory TSDB)
+
+3. **Signal Engine (Core Layer)**
+
+   * **Purpose:** Encapsulates each strategy’s logic behind a common interface.
+
+   * **Key Interface:**
+
+     ```java
+     public interface SignalStrategy {
+       /**
+        * Compute signals for time T given pre-processed data.
+        * @param context   – encapsulates all inputs (flows, returns, covariances…)
+        * @return List<Signal> – timestamped signal values
+        */
+       List<Signal> compute(Context context);
+     }
+     ```
+
+   * **Built-in Strategies:**
+
+     * **ContraflowStrategy** (long/short on low vs. high ETF flow stocks)&#x20;
+     * **ArbitrageComovementStrategy** (Λᵢ,ₑ measure of arbitrage sensitivity leading to over/under-reaction)&#x20;
+     * **CompositeCountryRotationStrategy** (top-down macro + bottom-up fundamentals + lead-lag)&#x20;
+     * **NLASRStockSelectionStrategy** (AdaBoost factor selection)&#x20;
+
+   * **Design Patterns:**
+
+     * **Strategy** for pluggable signal logic
+     * **Factory** to instantiate strategies from configuration
+     * **Observer** for notifying downstream when new signals are ready
+
+4. **Aggregation & Portfolio Construction Layer**
+
+   * **Purpose:** Transforms raw signals into orders or portfolio weights.
+   * **Components:**
+
+     * *SignalCombiner* – merges multiple signals (e.g. score weighting, orthogonalization)
+     * *RiskFilter* – applies position-sizing, exposure caps
+     * *Optimizer* – e.g. mean-variance or hierarchical risk parity
+
+5. **Execution & Simulation Layer**
+
+   * **Purpose:**
+
+     * **Live:** Routes orders to broker/exchange via FIX or REST.
+     * **Backtest:** Simulates fills, calculates performance metrics (IC, Sharpe, drawdown) .
+   * **Components:**
+
+     * *OrderManager* (handles order lifecycle)
+     * *Simulator* (market model, transaction cost module)
+
+6. **Persistence & Monitoring Layer**
+
+   * **Purpose:**
+
+     * Persist signals, trades, PnL; dashboard real-time monitoring; alerting on anomalies.
+   * **Components:**
+
+     * *TimeSeriesDatabase* for signals & factors
+     * *Metrics Aggregator* (Prometheus/Grafana)
+     * *Alerting Engine*
+
+---
+
+## 2. Key Cross-Cutting Concerns
+
+* **Configuration-Driven**
+  All parameters (look-back windows, weights, thresholds) live in YAML/JSON and are hot-reloadable.
+
+* **Dependency Injection**
+  Inject data connectors, strategy implementations, and risk modules to maximize testability.
+
+* **Event-Driven Messaging**
+  Use a message bus (e.g. Kafka) for real-time feeds and internal event propagation (new bar → preprocess → signal compute → execute).
+
+* **Modularity & Scalability**
+  Package each layer as a microservice or library, containerized for independent scaling.
+
+* **Logging & Tracing**
+  Structured logs at each step, distributed tracing (e.g. OpenTelemetry) to debug latency or data issues.
+
+---
+
+## 3. Extending with a New Strategy
+
+1. **Implement** the `SignalStrategy` interface.
+2. **Register** it in the `StrategyFactory` via config (e.g. `"strategies":[{"name":"MyNewSignal","class":"..."}]`).
+3. **Define** its input prerequisites (e.g. flows, returns) in the Pre-Processing config.
+4. **Wire** downstream: combine it in the `SignalCombiner` or as a standalone alpha.
+
+---
+
+### Why This Abstraction Helps
+
+* **Separation of Concerns:** Data ingestion, cleaning, signal logic, and execution are all decoupled.
+* **Reusability:** Common utilities (rolling stats, transaction-cost models) live in shared libraries.
+* **Testability:** You can unit-test each strategy in isolation with synthetic data.
+* **Maintainability:** New research ideas turn into code in a few steps—no monolithic blocks.
+
+This blueprint should give you a clear, software-engineering view of how to turn your quantitative strategies into a robust, production-grade signal platform.
