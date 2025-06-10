@@ -1,0 +1,284 @@
+-- 1. BOND PRICING AND RETURNS TABLE
+CREATE TABLE bond_daily_data (
+    date                    DATE NOT NULL,
+    cusip                   VARCHAR(9) NOT NULL,
+    isin                    VARCHAR(12),
+    ticker                  VARCHAR(20),
+    price_clean             DECIMAL(10,6),
+    price_dirty             DECIMAL(10,6),
+    yield_to_maturity       DECIMAL(8,6),
+    yield_to_worst          DECIMAL(8,6),
+    oas                     DECIMAL(8,4),
+    z_spread                DECIMAL(8,4),
+    bid_price               DECIMAL(10,6),
+    ask_price               DECIMAL(10,6),
+    mid_price               DECIMAL(10,6),
+    bid_ask_spread_bps      DECIMAL(6,2),
+    bid_size                DECIMAL(15,2),
+    ask_size                DECIMAL(15,2),
+    volume_traded           DECIMAL(15,2),
+    trade_count             INTEGER,
+    avg_trade_size          DECIMAL(10,2),
+    return_1d               DECIMAL(10,6),
+    return_clean_1d         DECIMAL(10,6),
+    excess_return_1d        DECIMAL(10,6),
+    price_source            VARCHAR(20),
+    is_matrix_priced        BOOLEAN,
+    last_trade_date         DATE,
+    PRIMARY KEY (date, cusip),
+    INDEX idx_cusip_date (cusip, date),
+    INDEX idx_return (date, return_1d)
+);
+
+-- 2. BOND STATIC CHARACTERISTICS
+CREATE TABLE bond_reference (
+    cusip                   VARCHAR(9) PRIMARY KEY,
+    isin                    VARCHAR(12),
+    ticker                  VARCHAR(20),
+    description             VARCHAR(255),
+    issuer_id               VARCHAR(20),
+    issuer_name             VARCHAR(100),
+    issuer_ticker           VARCHAR(10),
+    sector                  VARCHAR(50),
+    industry                VARCHAR(50),
+    country                 VARCHAR(2),
+    issue_date              DATE,
+    maturity_date           DATE,
+    coupon_rate             DECIMAL(8,4),
+    coupon_frequency        INTEGER,
+    day_count_convention    VARCHAR(20),
+    currency                VARCHAR(3),
+    amount_issued           DECIMAL(15,2),
+    amount_outstanding      DECIMAL(15,2),
+    min_piece               DECIMAL(10,2),
+    min_increment           DECIMAL(10,2),
+    seniority               VARCHAR(20),
+    secured_flag            BOOLEAN,
+    callable_flag           BOOLEAN,
+    puttable_flag           BOOLEAN,
+    convertible_flag        BOOLEAN,
+    floating_flag           BOOLEAN,
+    settlement_days         INTEGER,
+    settlement_type         VARCHAR(10),
+    bond_type               VARCHAR(20),
+    market_type             VARCHAR(20),
+    reg_type                VARCHAR(10),
+    INDEX idx_issuer (issuer_id),
+    INDEX idx_sector (sector),
+    INDEX idx_maturity (maturity_date)
+);
+
+-- 3. BOND RATINGS AND ANALYTICS
+CREATE TABLE bond_analytics (
+    date                    DATE NOT NULL,
+    cusip                   VARCHAR(9) NOT NULL,
+    rating_sp               VARCHAR(10),
+    rating_moody            VARCHAR(10),
+    rating_fitch            VARCHAR(10),
+    rating_numeric          INTEGER,
+    is_investment_grade     BOOLEAN,
+    is_high_yield           BOOLEAN,
+    duration_effective      DECIMAL(8,4),
+    duration_modified       DECIMAL(8,4),
+    duration_macaulay       DECIMAL(8,4),
+    duration_spread         DECIMAL(8,4),
+    convexity              DECIMAL(10,4),
+    dv01                   DECIMAL(10,6),
+    krd_6m                 DECIMAL(6,4),
+    krd_2y                 DECIMAL(6,4),
+    krd_5y                 DECIMAL(6,4),
+    krd_10y                DECIMAL(6,4),
+    krd_30y                DECIMAL(6,4),
+    liquidity_score        DECIMAL(6,4),
+    days_since_issued      INTEGER,
+    days_to_maturity       INTEGER,
+    PRIMARY KEY (date, cusip),
+    INDEX idx_rating_date (date, rating_numeric),
+    INDEX idx_duration (date, duration_effective)
+);
+
+-- 4. ETF HOLDINGS DATA
+CREATE TABLE etf_holdings (
+    date                    DATE NOT NULL,
+    etf_ticker              VARCHAR(10) NOT NULL,
+    cusip                   VARCHAR(9) NOT NULL,
+    par_amount              DECIMAL(15,2),
+    market_value            DECIMAL(15,2),
+    shares                  DECIMAL(15,4),
+    weight                  DECIMAL(10,8),
+    weight_squared          DECIMAL(10,8),
+    weight_rank             INTEGER,
+    is_top10_holding        BOOLEAN,
+    par_change_1d           DECIMAL(15,2),
+    weight_change_1d        DECIMAL(10,8),
+    PRIMARY KEY (date, etf_ticker, cusip),
+    INDEX idx_etf_date (etf_ticker, date),
+    INDEX idx_cusip_etf (cusip, etf_ticker, date),
+    INDEX idx_weight (date, etf_ticker, weight DESC)
+);
+
+-- 5. ETF MARKET DATA
+CREATE TABLE etf_daily_data (
+    date                    DATE NOT NULL,
+    etf_ticker              VARCHAR(10) NOT NULL,
+    price                   DECIMAL(10,4),
+    nav                     DECIMAL(10,4),
+    inav                    DECIMAL(10,4),
+    premium_discount_bps    DECIMAL(8,2),
+    volume_shares           BIGINT,
+    volume_dollars          DECIMAL(15,2),
+    shares_outstanding      DECIMAL(15,2),
+    shares_created          DECIMAL(15,2),
+    shares_redeemed         DECIMAL(15,2),
+    net_flows               DECIMAL(15,2),
+    bid                     DECIMAL(10,4),
+    ask                     DECIMAL(10,4),
+    bid_ask_spread_bps      DECIMAL(6,2),
+    return_1d               DECIMAL(10,6),
+    nav_return_1d           DECIMAL(10,6),
+    tracking_error_1d       DECIMAL(10,6),
+    volume_percentile       DECIMAL(5,2),
+    is_high_volume          BOOLEAN,
+    is_large_premium        BOOLEAN,
+    is_creation_day         BOOLEAN,
+    is_redemption_day       BOOLEAN,
+    PRIMARY KEY (date, etf_ticker),
+    INDEX idx_premium (date, premium_discount_bps),
+    INDEX idx_volume (date, volume_dollars DESC)
+);
+
+-- 6. INTRADAY ETF DATA
+CREATE TABLE etf_intraday (
+    timestamp               TIMESTAMP NOT NULL,
+    etf_ticker              VARCHAR(10) NOT NULL,
+    price                   DECIMAL(10,4),
+    bid                     DECIMAL(10,4),
+    ask                     DECIMAL(10,4),
+    mid                     DECIMAL(10,4),
+    volume_interval         INTEGER,
+    volume_cumulative       BIGINT,
+    inav                    DECIMAL(10,4),
+    premium_discount_bps    DECIMAL(8,2),
+    PRIMARY KEY (timestamp, etf_ticker),
+    INDEX idx_ticker_time (etf_ticker, timestamp)
+) PARTITION BY RANGE (DATE(timestamp));
+
+-- 7. TRACE TRANSACTION DATA
+CREATE TABLE trace_transactions (
+    trace_id                VARCHAR(20) NOT NULL,
+    execution_timestamp     TIMESTAMP NOT NULL,
+    report_timestamp        TIMESTAMP,
+    cusip                   VARCHAR(9) NOT NULL,
+    price                   DECIMAL(10,6),
+    yield                   DECIMAL(8,6),
+    quantity                DECIMAL(15,2),
+    side                    CHAR(1),
+    reporting_party         VARCHAR(10),
+    contra_party            VARCHAR(10),
+    is_interdealer          BOOLEAN,
+    special_condition       VARCHAR(20),
+    as_of_flag              BOOLEAN,
+    reversal_flag           BOOLEAN,
+    PRIMARY KEY (trace_id),
+    INDEX idx_cusip_time (cusip, execution_timestamp),
+    INDEX idx_time (execution_timestamp)
+) PARTITION BY RANGE (DATE(execution_timestamp));
+
+-- 8. ARBITRAGE SENSITIVITY MEASURES
+CREATE TABLE arbitrage_sensitivity (
+    date                    DATE NOT NULL,
+    cusip                   VARCHAR(9) NOT NULL,
+    etf_ticker              VARCHAR(10) NOT NULL,
+    price_impact_coef       DECIMAL(10,8),
+    weight                  DECIMAL(10,8),
+    weight_gamma            DECIMAL(10,8),
+    settlement_days         INTEGER,
+    lambda_bond             DECIMAL(10,8),
+    lambda_duration         DECIMAL(10,8),
+    lambda_credit           DECIMAL(10,8),
+    lambda_volume_interact  DECIMAL(10,8),
+    lambda_stress_interact  DECIMAL(10,8),
+    PRIMARY KEY (date, cusip, etf_ticker),
+    INDEX idx_lambda (date, etf_ticker, lambda_bond DESC)
+);
+
+-- 9. FLOW SIGNALS
+CREATE TABLE flow_signals (
+    date                    DATE NOT NULL,
+    cusip                   VARCHAR(9) NOT NULL,
+    bond_flow_1m            DECIMAL(12,6),
+    bond_flow_3m            DECIMAL(12,6),
+    bond_flow_6m            DECIMAL(12,6),
+    bond_flow_12m           DECIMAL(12,6),
+    duradj_flow_1m          DECIMAL(12,6),
+    duradj_flow_3m          DECIMAL(12,6),
+    duradj_flow_6m          DECIMAL(12,6),
+    duradj_flow_12m         DECIMAL(12,6),
+    enhanced_flow_6m        DECIMAL(12,6),
+    directional_flow_6m     DECIMAL(12,6),
+    flow_rank_sector        INTEGER,
+    flow_decile_sector      INTEGER,
+    flow_rank_rating        INTEGER,
+    flow_decile_rating      INTEGER,
+    PRIMARY KEY (date, cusip),
+    INDEX idx_flow_rank (date, flow_decile_sector)
+);
+
+-- 10. MARKET REGIME INDICATORS
+CREATE TABLE market_regimes (
+    date                    DATE PRIMARY KEY,
+    vix_level               DECIMAL(6,2),
+    vix_percentile          DECIMAL(5,2),
+    is_high_vol_regime      BOOLEAN,
+    ig_spread_level         DECIMAL(8,2),
+    hy_spread_level         DECIMAL(8,2),
+    spread_percentile       DECIMAL(5,2),
+    is_credit_stress        BOOLEAN,
+    is_month_end            BOOLEAN,
+    is_quarter_end          BOOLEAN,
+    is_fed_day              BOOLEAN,
+    is_option_expiry        BOOLEAN,
+    stress_indicator        DECIMAL(5,2),
+    regime_classification   VARCHAR(20)
+);
+
+-- 11. COMOVEMENT BETAS
+CREATE TABLE comovement_betas (
+    date                    DATE NOT NULL,
+    cusip                   VARCHAR(9) NOT NULL,
+    etf_ticker              VARCHAR(10) NOT NULL,
+    window_days             INTEGER NOT NULL,
+    beta_ols                DECIMAL(8,6),
+    beta_robust             DECIMAL(8,6),
+    beta_garch              DECIMAL(8,6),
+    beta_se                 DECIMAL(8,6),
+    beta_tstat              DECIMAL(8,4),
+    r_squared               DECIMAL(6,4),
+    beta_rolling_mean       DECIMAL(8,6),
+    beta_rolling_std        DECIMAL(8,6),
+    PRIMARY KEY (date, cusip, etf_ticker, window_days),
+    INDEX idx_beta (date, etf_ticker, beta_ols)
+);
+
+-- 12. STRATEGY PERFORMANCE TRACKING
+CREATE TABLE strategy_performance (
+    date                    DATE NOT NULL,
+    strategy_id             VARCHAR(50) NOT NULL,
+    gross_return            DECIMAL(10,6),
+    net_return              DECIMAL(10,6),
+    benchmark_return        DECIMAL(10,6),
+    active_return           DECIMAL(10,6),
+    rolling_volatility      DECIMAL(10,6),
+    rolling_sharpe          DECIMAL(8,4),
+    rolling_ir              DECIMAL(8,4),
+    max_drawdown_pct        DECIMAL(8,4),
+    long_exposure           DECIMAL(12,2),
+    short_exposure          DECIMAL(12,2),
+    gross_exposure          DECIMAL(12,2),
+    net_exposure            DECIMAL(12,2),
+    number_positions        INTEGER,
+    daily_turnover          DECIMAL(8,4),
+    transaction_costs_bps   DECIMAL(8,2),
+    PRIMARY KEY (date, strategy_id),
+    INDEX idx_strategy_date (strategy_id, date)
+);
