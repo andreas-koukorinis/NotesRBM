@@ -1,0 +1,97 @@
+An MVP for this bond‐ETF contraflow strategy—one that a single junior engineer could reasonably turn around in 1–2 weeks—might look like this:
+
+---
+
+## 1. Core Features
+
+1. **Data Ingestion**
+
+   * **Price & Par‐holdings**: Read two CSVs per month:
+
+     * `prices.csv` with columns `(date, bond_id, clean_price)`
+     * `holdings.csv` with `(date, bond_id, par_notional)`
+   * **Outstanding Par & Duration**: Read a static reference file `bond_universe.csv` with `(bond_id, total_par, duration)`.
+
+2. **Signal Calculation**
+
+   * Compute six‐month raw par‐flow per \[Eq. \eqref{eq\:raw\_flow}]:
+
+     ```python
+     flow[i,t] = (P[i,t] * Q[i,t] - P[i,t-6] * Q[i,t-6]) / (total_par[i]/100)
+     ```
+   * (Optionally) compute duration‐adjusted flow via \[Eq. \eqref{eq\:dur\_flow}].
+
+3. **Decile Sorting & Weights**
+
+   * Within each `(sector, rating)` group (you can hard‐code two or three dummy buckets), sort by flow and assign decile ranks.
+   * Long bottom decile, short top decile with equal‐notional weights as in \[Eq. \eqref{eq\:weights}].
+
+4. **Backtest Engine**
+
+   * Monthly rebalancing loop:
+
+     1. Load signals at month end.
+     2. Compute new weights.
+     3. Compute next-month bond returns from price series.
+     4. Calculate PnL = weights · returns.
+   * Output time series of strategy PnL, cumulative returns, and basic stats (Sharpe, turnover).
+
+5. **Performance Reporting**
+
+   * Tabulate: annualized Sharpe, average monthly return, max drawdown.
+   * Plot cumulative PnL.
+
+---
+
+## 2. Suggested Tech Stack
+
+* **Language**: Python 3
+* **Libraries**:
+
+  * `pandas` for data and signal calculations
+  * `numpy` for math
+  * `matplotlib` or `plotly` for simple charts
+  * `pytest` for a couple of sanity checks
+* **Repo Layout**:
+
+  ```
+  /data/
+    prices.csv
+    holdings.csv
+    bond_universe.csv
+  /src/
+    loader.py        # CSV ingestion
+    signals.py       # flow & rank logic
+    backtest.py      # monthly loop & PnL
+    report.py        # stats & plots
+  tests/
+    test_signals.py
+    test_loader.py
+  README.md
+  ```
+
+---
+
+## 3. Timeline & Tasks
+
+| Day | Task                                         |
+| --- | -------------------------------------------- |
+| 1   | Scaffold repo, set up CSV loader + README    |
+| 2   | Write and unit‐test raw flow calculation     |
+| 3   | Implement decile ranking & weight assignment |
+| 4   | Build monthly backtest loop                  |
+| 5   | Generate basic performance metrics           |
+| 6   | Add duration‐adjusted option (if time)       |
+| 7   | Polish plots, write up results in README     |
+
+---
+
+## 4. Minimal Tests
+
+1. **Signal Sanity**: For a single bond with constant price and holdings, flow should be zero.
+2. **Rank Correctness**: Given fabricated flows `[−2,−1,0,1,2]`, ensure decile assignment matches expectation.
+3. **PNL Check**: If you long constant-return bonds only, strategy return equals that bond’s return.
+
+---
+
+With that scaffold in place, a junior engineer can deliver a functioning prototype that demonstrates the contraflow effect on bond ETFs—and you’ll be ready to iterate by adding real‐world bells and whistles (liquidity screens, transaction costs, factor‐controls) in later sprints.
