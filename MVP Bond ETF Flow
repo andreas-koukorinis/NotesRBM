@@ -1,0 +1,146 @@
+ Strategy - Simplified Version
+Core Concept
+Track the 20 most liquid bond ETFs and their top 50 holdings to identify flow-driven opportunities.
+1. Data Collection (Manual/Semi-Automated)
+What You Need:
+
+ETF Holdings: Download daily holdings from ETF provider websites (iShares, Vanguard, SPDR)
+Bond Prices: Use FINRA TRACE for free end-of-day prices
+Basic Reference Data: Pull from Bloomberg/Reuters terminal once weekly
+
+MVP Approach:
+
+Focus on just 5 major ETFs initially: AGG, LQD, HYG, TLT, IEF
+Track only their top 50 holdings (covers ~70% of AUM)
+Use daily snapshots instead of intraday data
+Store in simple CSV files with date stamps
+
+2. Flow Calculation (Excel/Python Script)
+Simplified Method:
+
+Daily Flow = (Today's ETF Holding - Yesterday's ETF Holding) / Bond Outstanding Amount
+Ignore complex decomposition initially
+Just track "Total Flow" as single metric
+
+MVP Calculation:
+For each bond:
+  1. Sum holdings across all 5 ETFs
+  2. Calculate day-over-day change
+  3. Divide by bond's total outstanding
+  4. Save 20-day rolling sum
+3. Signal Generation (Basic Statistics)
+Simple Signal:
+
+Calculate 20-day flow for each bond
+Compute mean and standard deviation over past 6 months
+Generate z-score: (Current Flow - Mean) / StdDev
+Buy Signal: Z-score < -2 (heavy outflows)
+Sell Signal: Z-score > +2 (heavy inflows)
+No Signal: Otherwise
+
+MVP Output: Daily CSV with [Date, CUSIP, Flow Z-Score, Signal]
+4. Portfolio Construction (Rule-Based)
+Simple Rules:
+
+Maximum 10 positions (5 long, 5 short)
+Equal weight within each side (20% each)
+Only trade bonds with >$500M outstanding
+Only trade investment grade bonds initially
+Hold positions for exactly 20 days, then re-evaluate
+
+MVP Portfolio:
+
+Morning: Run signal calculation
+Select top 5 negative z-scores for longs
+Select top 5 positive z-scores for shorts
+Rebalance monthly to minimize trading
+
+5. Risk Management (Basic Limits)
+Simplified Controls:
+
+No single bond > 2% of portfolio
+No sector > 30% of portfolio
+Portfolio duration must be +/- 1 year of AGG
+Stop loss at -3% per position
+Maximum 100% gross exposure (50% long, 50% short)
+
+MVP Monitoring: Daily Excel sheet tracking positions vs limits
+6. Execution (Manual Trading)
+Practical Approach:
+
+Trade through institutional broker with bond desk
+Use limit orders at mid-market
+Accept wider spreads for simplicity
+Trade only at month-end to minimize costs
+Size trades at $100K minimum for liquidity
+
+MVP Execution Log: Track [Date, CUSIP, Direction, Size, Price, Spread Paid]
+7. Performance Tracking (Spreadsheet)
+Basic Metrics:
+
+Daily P&L by position
+Monthly return calculation
+Simple Sharpe ratio
+Win rate (% profitable trades)
+Average bid-ask spread paid
+
+MVP Dashboard: Single Excel sheet with charts updated daily
+8. Initial Testing Phase
+Paper Trading First:
+
+Run system for 3 months on paper
+Track hypothetical signals and returns
+Validate flow calculations against actual ETF trades
+Refine z-score thresholds based on results
+
+Technology Stack for MVP
+Minimal Requirements:
+
+Python: Basic pandas for data processing
+Excel: Portfolio tracking and risk monitoring
+FINRA TRACE: Free bond price data
+ETF Websites: Daily holdings data
+Email: Alerts for signals and limits
+
+Daily Workflow (2-3 hours):
+
+9:00 AM: Download ETF holdings (30 min)
+9:30 AM: Run Python script for flows (15 min)
+9:45 AM: Update Excel portfolio tracker (15 min)
+10:00 AM: Review signals and limits (30 min)
+10:30 AM: Place orders if rebalancing (30 min)
+End of Day: Update performance tracker (30 min)
+
+Key Simplifications
+
+No Complex Decomposition: Just track total flows
+No Regression Analysis: Use simple z-scores
+No Optimization: Equal weight positions
+Limited Universe: Only 250 bonds (50 per ETF × 5 ETFs)
+Monthly Rebalancing: Reduce transaction costs
+Manual Processes: Avoid complex automation initially
+
+Success Metrics for MVP
+Month 1-3 Goals:
+
+Successfully track flows for 250 bonds daily
+Generate signals with <1% error rate
+Execute paper trades within 10 bps of mid
+Achieve positive Sharpe ratio in backtest
+
+Month 4-6 Goals:
+
+Go live with $1-2M test capital
+Achieve 80% signal accuracy
+Maintain risk limits without breaches
+Generate positive returns after costs
+
+Expansion Path
+Once MVP is stable:
+
+Add more ETFs (expand to 20)
+Include high yield bonds
+Automate data collection
+Add regression-based signals
+Implement proper optimization
+Build real-time monitoring
