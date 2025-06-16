@@ -1,0 +1,152 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{color}
+\usepackage{caption}
+\usepackage{tikz}
+\usetikzlibrary{positioning,shapes,arrows.meta}
+
+\title{Intraday Pulse Strategy for Credit Markets}
+\author{AK}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+\newpage
+
+\section{Overview}
+This document presents a comprehensive intraday strategy for credit markets (corporate bond spreads, ETFs, and CDX indices). It integrates calendar and event clocks to exploit time-of-day patterns and volume- or trade-driven flow regimes.
+
+\section{Core Strategy Framework}
+
+\subsection{Signal Construction}
+
+\paragraph{Base Signal:} Compute hourly t-statistics of return distributions.
+
+\paragraph{Continuous Signal:} Use normalized t-statistic values for signal strength:
+\begin{equation}
+    s_{t} = \frac{2(t - \min t)}{\max t - \min t} - 1 \in [-1,1]
+\end{equation}
+
+\paragraph{Smoothed Signal:} Apply moving average smoothing for position stability.
+
+\section{Calendar Clock Implementation}
+
+\subsection{Time-of-Day Structure}
+
+\begin{itemize}
+    \item \textbf{Morning Session (9:30--11:00):} Reversal signals dominate. Short CDX, long ETFs post-reversion.
+    \item \textbf{Midday Session (11:00--14:00):} Mean-reverting behavior. Implement relative value between ETFs and CDX.
+    \item \textbf{Afternoon Session (14:00--16:00):} Momentum patterns intensify. Follow directional trends.
+\end{itemize}
+
+\subsection{Execution Rules}
+\begin{itemize}
+    \item Enter trades at the beginning of calendar windows.
+    \item Hold positions for a minimum of 30 minutes.
+    \item Avoid trading in the last 15 minutes of the session.
+\end{itemize}
+
+\section{Event Clock Implementation}
+
+\subsection{Volume-Based Triggers}
+\begin{itemize}
+    \item Monitor 5-minute volume bars.
+    \item Trade only when volume exceeds 1.5x 20-period MA.
+\end{itemize}
+
+\subsection{Trade Count Triggers}
+\begin{itemize}
+    \item Trade if count exceeds 80th percentile of historical distribution.
+    \item Exit positions when trade activity falls below 20th percentile.
+\end{itemize}
+
+\section{Instrument-Specific Adaptations}
+
+\subsection{Corporate Bond ETFs (e.g., LQD, HYG)}
+\begin{equation}
+    \text{Signal} = S_{t}^{\text{smoothed}} \times \frac{\text{vol}_{t}}{\text{vol}_{\text{avg}}} \times \left(\frac{1}{1 + \text{spread}}\right)
+\end{equation}
+
+\subsection{CDX Index}
+\begin{equation}
+    \text{Position Size} = S_0 \times (1 + \text{Momentum}) \times \left(\frac{1}{\text{realized vol}}\right)
+\end{equation}
+
+\section{Risk Management}
+
+\subsection{Position Sizing}
+\begin{itemize}
+    \item Inverse volatility weighting.
+    \item Cap exposure to 10\% of capital per position.
+    \item Reduce risk during low liquidity or wide spreads.
+\end{itemize}
+
+\subsection{Stop Losses}
+\begin{itemize}
+    \item Time-based: exit if no PnL improvement in 2 hours.
+    \item Price-based: 0.5\% stop on ETFs; 5bps on CDX.
+    \item Volume-based: exit if volume drops 50\% from entry.
+\end{itemize}
+
+\section{Implementation Algorithm (Pseudocode)}
+
+\begin{verbatim}
+def intraday_credit_strategy():
+    current_hour = get_market_hour()
+    hourly_signal = calculate_hourly_signal(returns_data)
+
+    volume_trigger = check_volume_threshold(current_volume, avg_volume)
+    trade_trigger = check_trade_count(trade_count, percentile_80)
+
+    if (hourly_signal > threshold) and (volume_trigger or trade_trigger):
+        position_size = calculate_position_size(
+            base_size=capital * 0.02,
+            volatility=get_realized_vol(),
+            spread=get_current_spread()
+        )
+
+        if instrument == "ETF":
+            execute_etf_trade(position_size, hourly_signal)
+        elif instrument == "CDX":
+            execute_cdx_trade(position_size, hourly_signal)
+
+    monitor_positions(stop_loss=0.005, time_limit=120)
+\end{verbatim}
+
+\section{Performance Monitoring}
+
+\begin{itemize}
+    \item Sharpe ratio segmented by session (AM, midday, PM).
+    \item Hit rate by volume percentile.
+    \item Average holding time.
+    \item Turnover cost as \% of returns.
+\end{itemize}
+
+\section{Regime Analysis and Execution}
+
+\begin{itemize}
+    \item Adjust signal thresholds based on credit spread regimes.
+    \item Overlay VIX-based filters.
+    \item Use limit orders in thin periods; market orders during liquidity windows.
+\end{itemize}
+
+\section{Data Requirements}
+\begin{itemize}
+    \item 5-minute bars for price, volume, and trade count.
+    \item Real-time bid-ask spreads.
+    \item ETF constituent data.
+\end{itemize}
+
+\section{Conclusion}
+The Intraday Pulse Strategy provides a multi-layered, adaptive trading approach tailored for credit instruments. It fuses calendar-based behavior with dynamic volume/event triggers and incorporates instrument-specific liquidity considerations, ensuring robustness in diverse intraday regimes.
+
+\end{document}
