@@ -1,0 +1,46 @@
+"""
+ETF Analytics - Type definitions, enums, and exceptions.
+"""
+
+from enum import Enum
+
+
+class DayCountConvention(Enum):
+    """Standard day count conventions for bond calculations."""
+    THIRTY_360 = "30/360"
+    ACT_360 = "ACT/360"
+    ACT_365 = "ACT/365"
+    ACT_ACT = "ACT/ACT"
+
+
+class PaymentFrequency(Enum):
+    """Bond payment frequencies."""
+    ANNUAL = 1
+    SEMI_ANNUAL = 2
+    QUARTERLY = 4
+    MONTHLY = 12
+
+
+class Currency(Enum):
+    """Supported currencies."""
+    USD = "USD"
+    EUR = "EUR"
+    GBP = "GBP"
+    JPY = "JPY"
+    CAD = "CAD"
+    AUD = "AUD"
+
+
+class ValidationError(Exception):
+    """Raised when input validation fails."""
+    pass
+
+
+class CalculationError(Exception):
+    """Raised when business logic calculation fails."""
+    pass
+
+
+class ConvergenceError(Exception):
+    """Raised when numerical methods fail to converge."""
+    pass
