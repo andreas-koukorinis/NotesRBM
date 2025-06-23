@@ -1,0 +1,148 @@
+"""
+ETF Analytics - Data models and structures.
+"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, List, Tuple
+
+from .types import DayCountConvention, PaymentFrequency, Currency
+
+
+@dataclass(frozen=True)
+class ValidatedBondIdentifier:
+    """Immutable, validated bond identification."""
+    bond_id: str
+    cusip: str
+    isin: str
+
+
+@dataclass(frozen=True)
+class ValidatedBondCharacteristics:
+    """Immutable, validated bond characteristics."""
+    coupon_rate: float
+    maturity_date: datetime
+    issue_date: datetime
+    par_amount: float
+    payment_frequency: PaymentFrequency
+    day_count_convention: DayCountConvention
+    currency: Currency
+    country: str
+
+
+@dataclass(frozen=True)
+class ValidatedMarketData:
+    """Immutable, validated market data."""
+    clean_price: float
+    accrued_interest: float
+    market_date: datetime
+    
+    @property
+    def dirty_price(self) -> float:
+        """Calculate dirty price from validated components."""
+        return self.clean_price + self.accrued_interest
+
+
+@dataclass(frozen=True)
+class ValidatedBondHolding:
+    """Complete validated bond holding."""
+    identifier: ValidatedBondIdentifier
+    characteristics: ValidatedBondCharacteristics
+    market_data: ValidatedMarketData
+    
+    @property
+    def market_value(self) -> float:
+        """Calculate market value from validated components."""
+        return (self.market_data.dirty_price / 100.0) * self.characteristics.par_amount
+
+
+@dataclass(frozen=True)
+class ValidatedYieldCurveData:
+    """Immutable, validated yield curve data."""
+    currency: Currency
+    tenors: Tuple[float, ...]
+    rates: Tuple[float, ...]
+    curve_date: datetime
+
+
+@dataclass(frozen=True)
+class ValidatedCalculationParameters:
+    """Immutable, validated calculation parameters."""
+    calculation_date: datetime
+    yield_convergence_tolerance: float
+    max_iterations: int
+    yield_solver_bounds: Tuple[float, float]
+
+
+@dataclass(frozen=True)
+class CashFlow:
+    """Individual cash flow result."""
+    date: datetime
+    amount: float
+    time_to_payment: float
+    is_principal: bool
+
+
+@dataclass(frozen=True)
+class BondAnalyticsResult:
+    """Complete bond analytics results."""
+    bond_id: str
+    yield_to_maturity: float
+    modified_duration: float
+    convexity: float
+    cash_flows: Tuple[CashFlow, ...]
+
+
+@dataclass(frozen=True)
+class PortfolioWeight:
+    """Portfolio weight result."""
+    bond_id: str
+    weight: float
+    market_value: float
+
+
+@dataclass(frozen=True)
+class ACFResult:
+    """ACF method calculation results."""
+    portfolio_yield: float
+    modified_duration: float
+    weighted_average_life: float
+    aggregated_cash_flows: Dict[float, List[float]]
+
+
+@dataclass(frozen=True)
+class WAResult:
+    """Weighted Average method calculation results."""
+    portfolio_yield: float
+    modified_duration: float
+    weighted_average_life: float
+
+
+@dataclass(frozen=True)
+class RiskMetrics:
+    """Portfolio risk metrics."""
+    cr01: float
+    spread_duration: float
+    portfolio_value: float
+    weighted_average_spread: float
+
+
+@dataclass(frozen=True)
+class ReturnDecomposition:
+    """Total return decomposition."""
+    carry_return: float
+    roll_return: float
+    price_return: float
+    total_return: float
+    time_horizon_days: int
+
+
+@dataclass(frozen=True)
+class PortfolioAnalytics:
+    """Complete portfolio analytics results."""
+    acf_method: ACFResult
+    wa_method: WAResult
+    risk_metrics: RiskMetrics
+    portfolio_weights: Tuple[PortfolioWeight, ...]
+    bond_analytics: Tuple[BondAnalyticsResult, ...]
+    calculation_date: datetime
