@@ -1,0 +1,130 @@
+"""
+ETF Analytics - Main analytics engine.
+"""
+
+import pandas as pd
+import logging
+from typing import Dict, List
+
+from .types import ValidationError, CalculationError, Currency
+from .models import ValidatedBondHolding, PortfolioAnalytics, ReturnDecomposition
+from .validators import InputValidator
+from .calculators import (
+    YieldCurveInterpolator, CashFlowGenerator, YieldSolver, BondAnalyticsCalculator,
+    PortfolioWeightCalculator, ACFCalculator, WACalculator, RiskMetricsCalculator,
+    ReturnAttributionCalculator
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class ETFAnalyticsEngine:
+    """Production-ready ETF analytics engine orchestrator."""
+    
+    def __init__(self, raw_holdings_data: List[Dict], raw_parameters: Dict, raw_yield_curves: Dict[str, Dict]):
+        logger.info("Starting ETF analytics engine initialization")
+        
+        self.parameters = InputValidator.validate_calculation_parameters(
+            raw_parameters['calculation_date'],
+            raw_parameters.get('yield_convergence_tolerance', 1e-8),
+            raw_parameters.get('max_iterations', 100),
+            raw_parameters.get('yield_solver_bounds', (-0.5, 2.0))
+        )
+        
+        validated_curves = {}
+        for currency_str, curve_data in raw_yield_curves.items():
+            validated_curve_data = InputValidator.validate_yield_curve_data(
+                currency_str, curve_data['tenors'], curve_data['rates'], curve_data['curve_date'])
+            validated_curves[validated_curve_data.currency] = YieldCurveInterpolator(validated_curve_data)
+        self.yield_curves = validated_curves
+        
+        validated_holdings = []
+        for holding_data in raw_holdings_data:
+            identifier = InputValidator.validate_bond_identifier(
+                holding_data['bond_id'], holding_data['cusip'], holding_data['isin'])
+            characteristics = InputValidator.validate_bond_characteristics(
+                holding_data['coupon_rate'], holding_data['maturity_date'], holding_data['issue_date'],
+                holding_data['par_amount'], holding_data['payment_frequency'],
+                holding_data['day_count_convention'], holding_data['currency'], holding_data['country'])
+            market_data = InputValidator.validate_market_data(
+                holding_data['clean_price'], holding_data['accrued_interest'], holding_data['market_date'])
+            validated_holdings.append(ValidatedBondHolding(
+                identifier=identifier, characteristics=characteristics, market_data=market_data))
+        self.holdings = InputValidator.validate_holdings_portfolio(validated_holdings)
+        
+        self.cash_flow_generator = CashFlowGenerator(self.parameters.calculation_date)
+        self.yield_solver = YieldSolver(self.parameters)
+        self.bond_calculator = BondAnalyticsCalculator(self.cash_flow_generator, self.yield_solver)
+        self.acf_calculator = ACFCalculator(self.yield_solver)
+        self.attribution_calculator = ReturnAttributionCalculator(self.yield_curves)
+        
+        self._calculate_all_analytics()
+        logger.info("ETF analytics engine initialization completed successfully")
+    
+    def _calculate_all_analytics(self):
+        try:
+            self.bond_analytics = tuple(self.bond_calculator.calculate_analytics(h) for h in self.holdings)
+            self.weights = PortfolioWeightCalculator.calculate_weights(self.holdings)
+            self.portfolio_value = sum(w.market_value for w in self.weights)
+            self.acf_result = self.acf_calculator.calculate_acf_analytics(self.bond_analytics, self.weights, self.holdings)
+            self.wa_result = WACalculator.calculate_wa_analytics(self.bond_analytics, self.weights, self.holdings, self.parameters.calculation_date)
+            self.risk_metrics = RiskMetricsCalculator.calculate_risk_metrics(self.acf_result, self.portfolio_value)
+        except Exception as e:
+            logger.error(f"Portfolio analytics calculation failed: {e}", exc_info=True)
+            raise CalculationError(f"Portfolio analytics calculation failed: {e}")
+    
+    def get_complete_analytics(self) -> PortfolioAnalytics:
+        return PortfolioAnalytics(
+            acf_method=self.acf_result,
+            wa_method=self.wa_result,
+            risk_metrics=self.risk_metrics,
+            portfolio_weights=self.weights,
+            bond_analytics=self.bond_analytics,
+            calculation_date=self.parameters.calculation_date
+        )
+    
+    def decompose_total_return(self, time_horizon_days: int) -> ReturnDecomposition:
+        if not isinstance(time_horizon_days, int) or time_horizon_days <= 0:
+            raise ValidationError("Time horizon must be positive integer")
+        return self.attribution_calculator.decompose_return(
+            self.holdings, self.weights, self.bond_analytics,
+            self.parameters.calculation_date, time_horizon_days)
+    
+    def export_summary_dataframe(self) -> pd.DataFrame:
+        summary_data = {
+            'Metric': [
+                'Portfolio Yield (%)',
+                'Modified Duration (years)',
+                'Weighted Average Life (years)',
+                'CR01 ($)',
+                'Portfolio Value ($)'
+            ],
+            'ACF Method': [
+                f"{self.acf_result.portfolio_yield * 100:.3f}",
+                f"{self.acf_result.modified_duration:.3f}",
+                f"{self.acf_result.weighted_average_life:.3f}",
+                f"{self.risk_metrics.cr01:,.2f}",
+                f"{self.risk_metrics.portfolio_value:,.2f}"
+            ],
+            'WA Method': [
+                f"{self.wa_result.portfolio_yield * 100:.3f}",
+                f"{self.wa_result.modified_duration:.3f}",
+                f"{self.wa_result.weighted_average_life:.3f}",
+                'N/A',
+                f"{self.risk_metrics.portfolio_value:,.2f}"
+            ]
+        }
+        return pd.DataFrame(summary_data)
+    
+    def export_detailed_dataframe(self) -> pd.DataFrame:
+        weight_lookup = {w.bond_id: w.weight for w in self.weights}
+        detailed_data = [{
+            'Bond ID': res.bond_id,
+            'Weight (%)': f"{weight_lookup.get(res.bond_id, 0.0) * 100:.2f}",
+            'YTM (%)': f"{res.yield_to_maturity * 100:.3f}",
+            'Mod Duration': f"{res.modified_duration:.3f}",
+            'Convexity': f"{res.convexity:.3f}",
+            '# CFs': len(res.cash_flows)
+        } for res in self.bond_analytics]
+        return pd.DataFrame(detailed_data)
