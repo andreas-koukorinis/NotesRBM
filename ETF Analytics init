@@ -1,0 +1,56 @@
+"""
+ETF Fixed Income Analytics Package
+
+A comprehensive, enterprise-grade package for ETF fixed income analytics with:
+- Strict input validation at boundaries
+- Immutable data structures
+- Clear separation of concerns
+- Predictable, strongly-typed interfaces
+- Comprehensive error handling and corrected financial logic
+
+Version: 5.0.0 (Refactored)
+"""
+
+from .engine import ETFAnalyticsEngine
+from .types import (
+    DayCountConvention, PaymentFrequency, Currency,
+    ValidationError, CalculationError, ConvergenceError
+)
+from .models import (
+    ValidatedBondIdentifier, ValidatedBondCharacteristics, ValidatedMarketData,
+    ValidatedBondHolding, ValidatedYieldCurveData, ValidatedCalculationParameters,
+    CashFlow, BondAnalyticsResult, PortfolioWeight, ACFResult, WAResult,
+    RiskMetrics, ReturnDecomposition, PortfolioAnalytics
+)
+from .validators import InputValidator
+from .calculators import (
+    DayCountCalculator, YieldCurveInterpolator, CashFlowGenerator, YieldSolver,
+    BondAnalyticsCalculator, PortfolioWeightCalculator, ACFCalculator,
+    WACalculator, RiskMetricsCalculator, ReturnAttributionCalculator
+)
+
+__version__ = "5.0.0"
+__author__ = "Analytics Team"
+
+__all__ = [
+    # Main engine
+    "ETFAnalyticsEngine",
+    
+    # Types and exceptions
+    "DayCountConvention", "PaymentFrequency", "Currency",
+    "ValidationError", "CalculationError", "ConvergenceError",
+    
+    # Data models
+    "ValidatedBondIdentifier", "ValidatedBondCharacteristics", "ValidatedMarketData",
+    "ValidatedBondHolding", "ValidatedYieldCurveData", "ValidatedCalculationParameters",
+    "CashFlow", "BondAnalyticsResult", "PortfolioWeight", "ACFResult", "WAResult",
+    "RiskMetrics", "ReturnDecomposition", "PortfolioAnalytics",
+    
+    # Validators
+    "InputValidator",
+    
+    # Calculators
+    "DayCountCalculator", "YieldCurveInterpolator", "CashFlowGenerator", "YieldSolver",
+    "BondAnalyticsCalculator", "PortfolioWeightCalculator", "ACFCalculator",
+    "WACalculator", "RiskMetricsCalculator", "ReturnAttributionCalculator",
+]
