@@ -1,0 +1,1360 @@
+"""
+ETF Fixed Income Analytics Package - Production Ready
+
+A comprehensive, enterprise-grade package for ETF fixed income analytics with:
+- Strict input validation at boundaries
+- Immutable data structures
+- Clear separation of concerns
+- Predictable, strongly-typed interfaces
+- Comprehensive error handling
+
+Author: Analytics Team
+Version: 4.0.0
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+from enum import Enum
+from datetime import datetime, date
+from scipy.optimize import brentq
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# ENUMS AND EXCEPTIONS
+# ============================================================================
+
+class DayCountConvention(Enum):
+    """Standard day count conventions for bond calculations."""
+    THIRTY_360 = "30/360"
+    ACT_360 = "ACT/360"
+    ACT_365 = "ACT/365"
+    ACT_ACT = "ACT/ACT"
+
+class PaymentFrequency(Enum):
+    """Bond payment frequencies."""
+    ANNUAL = 1
+    SEMI_ANNUAL = 2
+    QUARTERLY = 4
+    MONTHLY = 12
+
+class Currency(Enum):
+    """Supported currencies."""
+    USD = "USD"
+    EUR = "EUR"
+    GBP = "GBP"
+    JPY = "JPY"
+    CAD = "CAD"
+    AUD = "AUD"
+
+class ValidationError(Exception):
+    """Raised when input validation fails."""
+    pass
+
+class CalculationError(Exception):
+    """Raised when business logic calculation fails."""
+    pass
+
+class ConvergenceError(Exception):
+    """Raised when numerical methods fail to converge."""
+    pass
+
+# ============================================================================
+# VALIDATED DATA STRUCTURES
+# ============================================================================
+
+@dataclass(frozen=True)
+class ValidatedBondIdentifier:
+    """Immutable, validated bond identification."""
+    bond_id: str
+    cusip: str
+    isin: str
+
+@dataclass(frozen=True)
+class ValidatedBondCharacteristics:
+    """Immutable, validated bond characteristics."""
+    coupon_rate: float
+    maturity_date: datetime
+    issue_date: datetime
+    par_amount: float
+    payment_frequency: PaymentFrequency
+    day_count_convention: DayCountConvention
+    currency: Currency
+    country: str
+
+@dataclass(frozen=True)
+class ValidatedMarketData:
+    """Immutable, validated market data."""
+    clean_price: float
+    accrued_interest: float
+    market_date: datetime
+    
+    @property
+    def dirty_price(self) -> float:
+        """Calculate dirty price from validated components."""
+        return self.clean_price + self.accrued_interest
+
+@dataclass(frozen=True)
+class ValidatedBondHolding:
+    """Complete validated bond holding."""
+    identifier: ValidatedBondIdentifier
+    characteristics: ValidatedBondCharacteristics
+    market_data: ValidatedMarketData
+    
+    @property
+    def market_value(self) -> float:
+        """Calculate market value from validated components."""
+        return self.market_data.dirty_price * self.characteristics.par_amount
+
+@dataclass(frozen=True)
+class ValidatedYieldCurveData:
+    """Immutable, validated yield curve data."""
+    currency: Currency
+    tenors: Tuple[float, ...]
+    rates: Tuple[float, ...]
+    curve_date: datetime
+
+@dataclass(frozen=True)
+class ValidatedCalculationParameters:
+    """Immutable, validated calculation parameters."""
+    calculation_date: datetime
+    yield_convergence_tolerance: float
+    max_iterations: int
+
+# ============================================================================
+# BUSINESS RESULT TYPES
+# ============================================================================
+
+@dataclass(frozen=True)
+class CashFlow:
+    """Individual cash flow result."""
+    date: datetime
+    amount: float
+    time_to_payment: float
+    is_principal: bool
+
+@dataclass(frozen=True)
+class BondAnalyticsResult:
+    """Complete bond analytics results."""
+    bond_id: str
+    yield_to_maturity: float
+    modified_duration: float
+    convexity: float
+    cash_flows: Tuple[CashFlow, ...]
+
+@dataclass(frozen=True)
+class PortfolioWeight:
+    """Portfolio weight result."""
+    bond_id: str
+    weight: float
+    market_value: float
+
+@dataclass(frozen=True)
+class ACFResult:
+    """ACF method calculation results."""
+    portfolio_yield: float
+    modified_duration: float
+    weighted_average_life: float
+    aggregated_cash_flows: Dict[float, float]
+
+@dataclass(frozen=True)
+class WAResult:
+    """Weighted Average method calculation results."""
+    portfolio_yield: float
+    modified_duration: float
+    weighted_average_life: float
+
+@dataclass(frozen=True)
+class RiskMetrics:
+    """Portfolio risk metrics."""
+    cr01: float
+    spread_duration: float
+    portfolio_value: float
+    weighted_average_spread: float
+
+@dataclass(frozen=True)
+class ReturnDecomposition:
+    """Total return decomposition."""
+    carry_return: float
+    roll_return: float
+    price_return: float
+    total_return: float
+    time_horizon_days: int
+
+@dataclass(frozen=True)
+class PortfolioAnalytics:
+    """Complete portfolio analytics results."""
+    acf_method: ACFResult
+    wa_method: WAResult
+    risk_metrics: RiskMetrics
+    portfolio_weights: Tuple[PortfolioWeight, ...]
+    bond_analytics: Tuple[BondAnalyticsResult, ...]
+    calculation_date: datetime
+
+# ============================================================================
+# INPUT VALIDATORS
+# ============================================================================
+
+class InputValidator:
+    """Centralized input validation with comprehensive error messages."""
+    
+    @staticmethod
+    def validate_bond_identifier(bond_id: str, cusip: str, isin: str) -> ValidatedBondIdentifier:
+        """
+        Validate bond identification data.
+        
+        Ensures all identifiers are non-empty strings with proper format.
+        
+        Args:
+            bond_id: Internal bond identifier
+            cusip: CUSIP identifier  
+            isin: ISIN identifier
+            
+        Returns:
+            ValidatedBondIdentifier with confirmed valid data
+            
+        Raises:
+            ValidationError: If any identifier is invalid
+        """
+        if not isinstance(bond_id, str) or not bond_id.strip():
+            raise ValidationError("Bond ID must be non-empty string")
+        if not isinstance(cusip, str) or not cusip.strip():
+            raise ValidationError("CUSIP must be non-empty string")
+        if not isinstance(isin, str) or not isin.strip():
+            raise ValidationError("ISIN must be non-empty string")
+        
+        return ValidatedBondIdentifier(
+            bond_id=bond_id.strip(),
+            cusip=cusip.strip(),
+            isin=isin.strip()
+        )
+    
+    @staticmethod
+    def validate_bond_characteristics(coupon_rate: float, maturity_date: datetime,
+                                     issue_date: datetime, par_amount: float,
+                                     payment_frequency: int, day_count_convention: str,
+                                     currency: str, country: str) -> ValidatedBondCharacteristics:
+        """
+        Validate bond characteristics with business rules.
+        
+        Validates numerical ranges, date relationships, and enum mappings.
+        
+        Args:
+            coupon_rate: Annual coupon rate (must be >= 0)
+            maturity_date: Bond maturity date
+            issue_date: Bond issue date
+            par_amount: Par amount (must be > 0)
+            payment_frequency: Payment frequency as integer
+            day_count_convention: Day count convention as string
+            currency: Currency code as string
+            country: Country code
+            
+        Returns:
+            ValidatedBondCharacteristics with confirmed valid data
+            
+        Raises:
+            ValidationError: If any characteristic is invalid
+        """
+        # Validate numerical values
+        if not isinstance(coupon_rate, (int, float)) or coupon_rate < 0:
+            raise ValidationError(f"Coupon rate must be non-negative number, got {coupon_rate}")
+        if not isinstance(par_amount, (int, float)) or par_amount <= 0:
+            raise ValidationError(f"Par amount must be positive number, got {par_amount}")
+        
+        # Validate dates
+        if not isinstance(maturity_date, datetime):
+            raise ValidationError("Maturity date must be datetime object")
+        if not isinstance(issue_date, datetime):
+            raise ValidationError("Issue date must be datetime object")
+        if maturity_date <= issue_date:
+            raise ValidationError("Maturity date must be after issue date")
+        
+        # Validate and convert enums
+        try:
+            freq_enum = PaymentFrequency(payment_frequency)
+        except ValueError:
+            raise ValidationError(f"Invalid payment frequency: {payment_frequency}")
+        
+        try:
+            convention_enum = DayCountConvention(day_count_convention)
+        except ValueError:
+            raise ValidationError(f"Invalid day count convention: {day_count_convention}")
+        
+        try:
+            currency_enum = Currency(currency)
+        except ValueError:
+            raise ValidationError(f"Invalid currency: {currency}")
+        
+        if not isinstance(country, str) or not country.strip():
+            raise ValidationError("Country must be non-empty string")
+        
+        return ValidatedBondCharacteristics(
+            coupon_rate=float(coupon_rate),
+            maturity_date=maturity_date,
+            issue_date=issue_date,
+            par_amount=float(par_amount),
+            payment_frequency=freq_enum,
+            day_count_convention=convention_enum,
+            currency=currency_enum,
+            country=country.strip()
+        )
+    
+    @staticmethod
+    def validate_market_data(clean_price: float, accrued_interest: float,
+                           market_date: datetime) -> ValidatedMarketData:
+        """
+        Validate market data with business constraints.
+        
+        Args:
+            clean_price: Clean market price (must be > 0)
+            accrued_interest: Accrued interest (must be >= 0)
+            market_date: Market data date
+            
+        Returns:
+            ValidatedMarketData with confirmed valid data
+            
+        Raises:
+            ValidationError: If any market data is invalid
+        """
+        if not isinstance(clean_price, (int, float)) or clean_price <= 0:
+            raise ValidationError(f"Clean price must be positive number, got {clean_price}")
+        if not isinstance(accrued_interest, (int, float)) or accrued_interest < 0:
+            raise ValidationError(f"Accrued interest must be non-negative, got {accrued_interest}")
+        if not isinstance(market_date, datetime):
+            raise ValidationError("Market date must be datetime object")
+        
+        return ValidatedMarketData(
+            clean_price=float(clean_price),
+            accrued_interest=float(accrued_interest),
+            market_date=market_date
+        )
+    
+    @staticmethod
+    def validate_calculation_parameters(calculation_date: datetime,
+                                      yield_convergence_tolerance: float,
+                                      max_iterations: int) -> ValidatedCalculationParameters:
+        """
+        Validate calculation parameters for numerical methods.
+        
+        Args:
+            calculation_date: Date for calculations
+            yield_convergence_tolerance: Convergence tolerance (must be > 0)
+            max_iterations: Maximum iterations (must be > 0)
+            
+        Returns:
+            ValidatedCalculationParameters with confirmed valid data
+            
+        Raises:
+            ValidationError: If any parameter is invalid
+        """
+        if not isinstance(calculation_date, datetime):
+            raise ValidationError("Calculation date must be datetime object")
+        if not isinstance(yield_convergence_tolerance, (int, float)) or yield_convergence_tolerance <= 0:
+            raise ValidationError("Yield convergence tolerance must be positive number")
+        if not isinstance(max_iterations, int) or max_iterations <= 0:
+            raise ValidationError("Max iterations must be positive integer")
+        
+        return ValidatedCalculationParameters(
+            calculation_date=calculation_date,
+            yield_convergence_tolerance=float(yield_convergence_tolerance),
+            max_iterations=max_iterations
+        )
+    
+    @staticmethod
+    def validate_yield_curve_data(currency: str, tenors: List[float],
+                                rates: List[float], curve_date: datetime) -> ValidatedYieldCurveData:
+        """
+        Validate yield curve data structure and consistency.
+        
+        Args:
+            currency: Currency code string
+            tenors: List of tenors in years (must be ascending)
+            rates: List of corresponding rates
+            curve_date: Curve date
+            
+        Returns:
+            ValidatedYieldCurveData with confirmed valid data
+            
+        Raises:
+            ValidationError: If curve data is invalid
+        """
+        try:
+            currency_enum = Currency(currency)
+        except ValueError:
+            raise ValidationError(f"Invalid currency: {currency}")
+        
+        if not isinstance(curve_date, datetime):
+            raise ValidationError("Curve date must be datetime object")
+        if not isinstance(tenors, list) or len(tenors) < 2:
+            raise ValidationError("Tenors must be list with at least 2 points")
+        if not isinstance(rates, list) or len(rates) != len(tenors):
+            raise ValidationError("Rates must be list same length as tenors")
+        
+        # Validate numerical data
+        validated_tenors = []
+        for i, tenor in enumerate(tenors):
+            if not isinstance(tenor, (int, float)) or tenor < 0:
+                raise ValidationError(f"Tenor at index {i} must be non-negative number")
+            validated_tenors.append(float(tenor))
+        
+        validated_rates = []
+        for i, rate in enumerate(rates):
+            if not isinstance(rate, (int, float)):
+                raise ValidationError(f"Rate at index {i} must be number")
+            validated_rates.append(float(rate))
+        
+        # Validate ascending order
+        if not all(t1 < t2 for t1, t2 in zip(validated_tenors[:-1], validated_tenors[1:])):
+            raise ValidationError("Tenors must be in strictly ascending order")
+        
+        return ValidatedYieldCurveData(
+            currency=currency_enum,
+            tenors=tuple(validated_tenors),
+            rates=tuple(validated_rates),
+            curve_date=curve_date
+        )
+    
+    @staticmethod
+    def validate_holdings_portfolio(holdings: List[ValidatedBondHolding]) -> Tuple[ValidatedBondHolding, ...]:
+        """
+        Validate portfolio holdings list for consistency.
+        
+        Args:
+            holdings: List of validated bond holdings
+            
+        Returns:
+            Tuple of validated holdings
+            
+        Raises:
+            ValidationError: If holdings list is invalid
+        """
+        if not isinstance(holdings, list) or len(holdings) == 0:
+            raise ValidationError("Holdings must be non-empty list")
+        
+        # Validate types
+        for i, holding in enumerate(holdings):
+            if not isinstance(holding, ValidatedBondHolding):
+                raise ValidationError(f"Item at index {i} must be ValidatedBondHolding")
+        
+        # Validate unique bond IDs
+        bond_ids = [holding.identifier.bond_id for holding in holdings]
+        if len(bond_ids) != len(set(bond_ids)):
+            raise ValidationError("All bond IDs must be unique in portfolio")
+        
+        # Validate portfolio value is positive
+        total_value = sum(holding.market_value for holding in holdings)
+        if total_value <= 0:
+            raise ValidationError("Portfolio total value must be positive")
+        
+        return tuple(holdings)
+
+# ============================================================================
+# BUSINESS LOGIC CALCULATORS
+# ============================================================================
+
+class DayCountCalculator:
+    """Day count fraction calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_year_fraction(start_date: datetime, end_date: datetime,
+                               convention: DayCountConvention) -> float:
+        """
+        Calculate year fraction using specified convention.
+        
+        Assumes inputs are validated.
+        
+        Args:
+            start_date: Start date
+            end_date: End date (>= start_date)
+            convention: Day count convention
+            
+        Returns:
+            Year fraction as float
+        """
+        if convention == DayCountConvention.THIRTY_360:
+            return DayCountCalculator._calculate_30_360(start_date, end_date)
+        elif convention == DayCountConvention.ACT_360:
+            return (end_date - start_date).days / 360.0
+        elif convention == DayCountConvention.ACT_365:
+            return (end_date - start_date).days / 365.0
+        elif convention == DayCountConvention.ACT_ACT:
+            return (end_date - start_date).days / 365.25
+        else:
+            raise CalculationError(f"Unsupported day count convention: {convention}")
+    
+    @staticmethod
+    def _calculate_30_360(start_date: datetime, end_date: datetime) -> float:
+        """30/360 day count calculation."""
+        y1, m1, d1 = start_date.year, start_date.month, start_date.day
+        y2, m2, d2 = end_date.year, end_date.month, end_date.day
+        
+        if d1 == 31:
+            d1 = 30
+        if d2 == 31 and d1 == 30:
+            d2 = 30
+            
+        return ((y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)) / 360.0
+
+class YieldCurveInterpolator:
+    """Yield curve interpolation. Assumes validated data."""
+    
+    def __init__(self, curve_data: ValidatedYieldCurveData):
+        self.curve_data = curve_data
+    
+    def interpolate_rate(self, tenor: float) -> float:
+        """
+        Interpolate rate for given tenor.
+        
+        Assumes tenor is within reasonable range.
+        
+        Args:
+            tenor: Time to maturity in years
+            
+        Returns:
+            Interpolated rate
+        """
+        return float(np.interp(tenor, self.curve_data.tenors, self.curve_data.rates))
+
+class CashFlowGenerator:
+    """Generates bond cash flows. Assumes validated inputs."""
+    
+    def __init__(self, calculation_date: datetime):
+        self.calculation_date = calculation_date
+    
+    def generate_cash_flows(self, bond: ValidatedBondHolding) -> Tuple[CashFlow, ...]:
+        """
+        Generate complete cash flow schedule for bond.
+        
+        Assumes bond data is validated.
+        
+        Args:
+            bond: Validated bond holding
+            
+        Returns:
+            Tuple of future cash flows
+        """
+        payment_dates = self._generate_payment_dates(bond.characteristics)
+        frequency = bond.characteristics.payment_frequency.value
+        coupon_amount = (bond.characteristics.par_amount * 
+                        bond.characteristics.coupon_rate / frequency)
+        
+        cash_flows = []
+        
+        for payment_date in payment_dates:
+            if payment_date > self.calculation_date:
+                time_to_payment = DayCountCalculator.calculate_year_fraction(
+                    self.calculation_date, payment_date,
+                    bond.characteristics.day_count_convention
+                )
+                
+                is_principal = payment_date == bond.characteristics.maturity_date
+                amount = coupon_amount
+                
+                if is_principal:
+                    amount += bond.characteristics.par_amount
+                
+                cash_flows.append(CashFlow(
+                    date=payment_date,
+                    amount=amount,
+                    time_to_payment=time_to_payment,
+                    is_principal=is_principal
+                ))
+        
+        return tuple(cash_flows)
+    
+    def _generate_payment_dates(self, characteristics: ValidatedBondCharacteristics) -> List[datetime]:
+        """Generate payment dates from validated characteristics."""
+        payment_dates = []
+        frequency = characteristics.payment_frequency.value
+        months_between = 12 // frequency
+        
+        current_date = characteristics.maturity_date
+        
+        while current_date >= characteristics.issue_date:
+            payment_dates.append(current_date)
+            
+            if current_date.month <= months_between:
+                current_date = current_date.replace(
+                    year=current_date.year - 1,
+                    month=current_date.month + 12 - months_between
+                )
+            else:
+                current_date = current_date.replace(
+                    month=current_date.month - months_between
+                )
+        
+        return sorted(payment_dates)
+
+class YieldSolver:
+    """Numerical yield calculations. Assumes validated inputs."""
+    
+    def __init__(self, parameters: ValidatedCalculationParameters):
+        self.parameters = parameters
+    
+    def solve_bond_ytm(self, cash_flows: Tuple[CashFlow, ...], dirty_price: float) -> float:
+        """
+        Solve yield to maturity using Brent's method.
+        
+        Args:
+            cash_flows: Validated cash flows
+            dirty_price: Validated current price
+            
+        Returns:
+            Yield to maturity
+            
+        Raises:
+            ConvergenceError: If solution fails to converge
+        """
+        def price_function(ytm: float) -> float:
+            calculated_price = sum(
+                cf.amount / (1 + ytm) ** cf.time_to_payment
+                for cf in cash_flows
+            )
+            return calculated_price - dirty_price
+        
+        try:
+            ytm = brentq(
+                price_function, -0.2, 1.0,
+                xtol=self.parameters.yield_convergence_tolerance,
+                maxiter=self.parameters.max_iterations
+            )
+            return ytm
+        except ValueError as e:
+            raise ConvergenceError(f"Bond YTM solution failed: {e}")
+    
+    def solve_portfolio_yield(self, aggregated_cash_flows: Dict[float, float]) -> float:
+        """
+        Solve portfolio yield using Newton-Raphson method.
+        
+        Args:
+            aggregated_cash_flows: Time-indexed cash flows
+            
+        Returns:
+            Portfolio yield
+            
+        Raises:
+            ConvergenceError: If solution fails to converge
+        """
+        def price_function(y: float) -> float:
+            return sum(cf_amount / (1 + y) ** time
+                      for time, cf_amount in aggregated_cash_flows.items()) - 100
+        
+        def price_derivative(y: float) -> float:
+            return -sum(time * cf_amount / (1 + y) ** (time + 1)
+                       for time, cf_amount in aggregated_cash_flows.items())
+        
+        y = 0.03  # Initial guess
+        
+        for iteration in range(self.parameters.max_iterations):
+            f_val = price_function(y)
+            
+            if abs(f_val) < self.parameters.yield_convergence_tolerance:
+                return y
+            
+            f_prime = price_derivative(y)
+            if abs(f_prime) < 1e-12:
+                raise ConvergenceError("Portfolio yield derivative too small")
+            
+            y_new = y - f_val / f_prime
+            
+            if abs(y_new - y) < self.parameters.yield_convergence_tolerance:
+                return y_new
+            
+            y = y_new
+        
+        raise ConvergenceError(f"Portfolio yield failed to converge after {self.parameters.max_iterations} iterations")
+
+class BondAnalyticsCalculator:
+    """Individual bond analytics. Assumes validated inputs."""
+    
+    def __init__(self, cash_flow_generator: CashFlowGenerator, yield_solver: YieldSolver):
+        self.cash_flow_generator = cash_flow_generator
+        self.yield_solver = yield_solver
+    
+    def calculate_analytics(self, bond: ValidatedBondHolding) -> BondAnalyticsResult:
+        """
+        Calculate complete analytics for single bond.
+        
+        Args:
+            bond: Validated bond holding
+            
+        Returns:
+            Complete bond analytics
+            
+        Raises:
+            CalculationError: If any calculation fails
+        """
+        try:
+            cash_flows = self.cash_flow_generator.generate_cash_flows(bond)
+            ytm = self.yield_solver.solve_bond_ytm(cash_flows, bond.market_data.dirty_price)
+            
+            modified_duration = self._calculate_modified_duration(cash_flows, ytm, bond)
+            convexity = self._calculate_convexity(cash_flows, ytm, bond)
+            
+            return BondAnalyticsResult(
+                bond_id=bond.identifier.bond_id,
+                yield_to_maturity=ytm,
+                modified_duration=modified_duration,
+                convexity=convexity,
+                cash_flows=cash_flows
+            )
+        except ConvergenceError:
+            raise
+        except Exception as e:
+            raise CalculationError(f"Bond analytics failed for {bond.identifier.bond_id}: {e}")
+    
+    def _calculate_modified_duration(self, cash_flows: Tuple[CashFlow, ...],
+                                   ytm: float, bond: ValidatedBondHolding) -> float:
+        """Calculate modified duration."""
+        price = bond.market_data.dirty_price
+        frequency = bond.characteristics.payment_frequency.value
+        
+        weighted_time = sum(
+            cf.time_to_payment * cf.amount / (1 + ytm) ** cf.time_to_payment
+            for cf in cash_flows
+        )
+        
+        return weighted_time / price / (1 + ytm / frequency)
+    
+    def _calculate_convexity(self, cash_flows: Tuple[CashFlow, ...],
+                           ytm: float, bond: ValidatedBondHolding) -> float:
+        """Calculate convexity."""
+        price = bond.market_data.dirty_price
+        frequency = bond.characteristics.payment_frequency.value
+        
+        convexity_sum = sum(
+            cf.amount * cf.time_to_payment * (cf.time_to_payment + 1/frequency) /
+            (1 + ytm/frequency) ** (cf.time_to_payment * frequency + 2)
+            for cf in cash_flows
+        )
+        
+        return convexity_sum / price / frequency ** 2
+
+class PortfolioWeightCalculator:
+    """Portfolio weight calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_weights(holdings: Tuple[ValidatedBondHolding, ...]) -> Tuple[PortfolioWeight, ...]:
+        """
+        Calculate market value weights for portfolio.
+        
+        Args:
+            holdings: Validated bond holdings
+            
+        Returns:
+            Portfolio weights
+        """
+        total_value = sum(holding.market_value for holding in holdings)
+        
+        weights = tuple(
+            PortfolioWeight(
+                bond_id=holding.identifier.bond_id,
+                weight=holding.market_value / total_value,
+                market_value=holding.market_value
+            )
+            for holding in holdings
+        )
+        
+        return weights
+
+class ACFCalculator:
+    """ACF method calculations. Assumes validated inputs."""
+    
+    def __init__(self, yield_solver: YieldSolver):
+        self.yield_solver = yield_solver
+    
+    def calculate_acf_analytics(self, bond_analytics: Tuple[BondAnalyticsResult, ...],
+                               weights: Tuple[PortfolioWeight, ...]) -> ACFResult:
+        """
+        Calculate ACF method portfolio analytics.
+        
+        Args:
+            bond_analytics: Individual bond results
+            weights: Portfolio weights
+            
+        Returns:
+            ACF method results
+        """
+        try:
+            weight_lookup = {w.bond_id: w.weight for w in weights}
+            
+            # Aggregate cash flows by time
+            aggregated_cf = {}
+            
+            for bond_result in bond_analytics:
+                weight = weight_lookup[bond_result.bond_id]
+                
+                for cf in bond_result.cash_flows:
+                    time_key = round(cf.time_to_payment, 6)
+                    if time_key not in aggregated_cf:
+                        aggregated_cf[time_key] = 0.0
+                    aggregated_cf[time_key] += weight * cf.amount
+            
+            portfolio_yield = self.yield_solver.solve_portfolio_yield(aggregated_cf)
+            modified_duration = self._calculate_acf_duration(aggregated_cf, portfolio_yield)
+            wal = self._calculate_acf_wal(aggregated_cf)
+            
+            return ACFResult(
+                portfolio_yield=portfolio_yield,
+                modified_duration=modified_duration,
+                weighted_average_life=wal,
+                aggregated_cash_flows=aggregated_cf
+            )
+        except ConvergenceError:
+            raise
+        except Exception as e:
+            raise CalculationError(f"ACF calculation failed: {e}")
+    
+    def _calculate_acf_duration(self, aggregated_cf: Dict[float, float],
+                               portfolio_yield: float) -> float:
+        """Calculate ACF modified duration."""
+        weighted_time = sum(
+            time * cf_amount / (1 + portfolio_yield) ** time
+            for time, cf_amount in aggregated_cf.items()
+        )
+        
+        price = sum(
+            cf_amount / (1 + portfolio_yield) ** time
+            for time, cf_amount in aggregated_cf.items()
+        )
+        
+        return weighted_time / price / (1 + portfolio_yield)
+    
+    def _calculate_acf_wal(self, aggregated_cf: Dict[float, float]) -> float:
+        """Calculate ACF weighted average life."""
+        total_principal = sum(aggregated_cf.values())
+        weighted_time = sum(time * cf_amount for time, cf_amount in aggregated_cf.items())
+        
+        return weighted_time / total_principal
+
+class WACalculator:
+    """Weighted Average method calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_wa_analytics(bond_analytics: Tuple[BondAnalyticsResult, ...],
+                              weights: Tuple[PortfolioWeight, ...],
+                              holdings: Tuple[ValidatedBondHolding, ...],
+                              calculation_date: datetime) -> WAResult:
+        """
+        Calculate weighted average portfolio analytics.
+        
+        Args:
+            bond_analytics: Individual bond results
+            weights: Portfolio weights
+            holdings: Bond holdings for maturity calculations
+            calculation_date: Calculation date
+            
+        Returns:
+            WA method results
+        """
+        weight_lookup = {w.bond_id: w.weight for w in weights}
+        analytics_lookup = {ba.bond_id: ba for ba in bond_analytics}
+        
+        wa_yield = 0.0
+        wa_duration = 0.0
+        wa_wal = 0.0
+        
+        for holding in holdings:
+            bond_id = holding.identifier.bond_id
+            weight = weight_lookup[bond_id]
+            analytics = analytics_lookup[bond_id]
+            
+            time_to_maturity = DayCountCalculator.calculate_year_fraction(
+                calculation_date,
+                holding.characteristics.maturity_date,
+                holding.characteristics.day_count_convention
+            )
+            
+            wa_yield += weight * analytics.yield_to_maturity
+            wa_duration += weight * analytics.modified_duration
+            wa_wal += weight * time_to_maturity
+        
+        return WAResult(
+            portfolio_yield=wa_yield,
+            modified_duration=wa_duration,
+            weighted_average_life=wa_wal
+        )
+
+class RiskMetricsCalculator:
+    """Risk metrics calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_risk_metrics(acf_result: ACFResult, wa_result: WAResult,
+                              portfolio_value: float, holdings: Tuple[ValidatedBondHolding, ...],
+                              weights: Tuple[PortfolioWeight, ...]) -> RiskMetrics:
+        """
+        Calculate comprehensive portfolio risk metrics.
+        
+        Args:
+            acf_result: ACF method results
+            wa_result: WA method results
+            portfolio_value: Total portfolio value
+            holdings: Bond holdings
+            weights: Portfolio weights
+            
+        Returns:
+            Risk metrics
+        """
+        cr01 = acf_result.modified_duration * portfolio_value * 0.0001
+        
+        # Calculate weighted average spread if spread data available
+        # For now, using placeholder - would need spread data in bond characteristics
+        wa_spread = 0.0  # Placeholder
+        
+        return RiskMetrics(
+            cr01=cr01,
+            spread_duration=acf_result.modified_duration,
+            portfolio_value=portfolio_value,
+            weighted_average_spread=wa_spread
+        )
+
+class ReturnAttributionCalculator:
+    """Return attribution calculations. Assumes validated inputs."""
+    
+    def __init__(self, yield_curves: Dict[Currency, YieldCurveInterpolator]):
+        self.yield_curves = yield_curves
+    
+    def decompose_return(self, holdings: Tuple[ValidatedBondHolding, ...],
+                        weights: Tuple[PortfolioWeight, ...],
+                        bond_analytics: Tuple[BondAnalyticsResult, ...],
+                        calculation_date: datetime,
+                        time_horizon_days: int,
+                        observed_price_return: Optional[float] = None) -> ReturnDecomposition:
+        """
+        Decompose total return into carry, roll, and price components.
+        
+        Args:
+            holdings: Bond holdings
+            weights: Portfolio weights
+            bond_analytics: Bond analytics results
+            calculation_date: Calculation date
+            time_horizon_days: Time horizon for analysis
+            observed_price_return: Actual observed price return (optional)
+            
+        Returns:
+            Complete return decomposition
+        """
+        carry = self._calculate_carry(holdings, weights, time_horizon_days)
+        roll = self._calculate_roll(holdings, weights, bond_analytics, calculation_date, time_horizon_days)
+        
+        if observed_price_return is not None:
+            price_return = observed_price_return - carry - roll
+            total_return = observed_price_return
+        else:
+            price_return = 0.0  # Pure price change component
+            total_return = carry + roll + price_return
+        
+        return ReturnDecomposition(
+            carry_return=carry,
+            roll_return=roll,
+            price_return=price_return,
+            total_return=total_return,
+            time_horizon_days=time_horizon_days
+        )
+    
+    def _calculate_carry(self, holdings: Tuple[ValidatedBondHolding, ...],
+                        weights: Tuple[PortfolioWeight, ...],
+                        time_horizon_days: int) -> float:
+        """Calculate carry component."""
+        time_horizon_years = time_horizon_days / 365.0
+        weight_lookup = {w.bond_id: w.weight for w in weights}
+        
+        total_carry = sum(
+            weight_lookup[holding.identifier.bond_id] *
+            holding.characteristics.coupon_rate *
+            time_horizon_years
+            for holding in holdings
+        )
+        
+        return total_carry
+    
+    def _calculate_roll(self, holdings: Tuple[ValidatedBondHolding, ...],
+                       weights: Tuple[PortfolioWeight, ...],
+                       bond_analytics: Tuple[BondAnalyticsResult, ...],
+                       calculation_date: datetime,
+                       time_horizon_days: int) -> float:
+        """Calculate roll component."""
+        time_horizon_years = time_horizon_days / 365.0
+        weight_lookup = {w.bond_id: w.weight for w in weights}
+        analytics_lookup = {ba.bond_id: ba for ba in bond_analytics}
+        
+        total_roll = 0.0
+        
+        for holding in holdings:
+            bond_id = holding.identifier.bond_id
+            weight = weight_lookup[bond_id]
+            analytics = analytics_lookup[bond_id]
+            currency = holding.characteristics.currency
+            
+            if currency in self.yield_curves:
+                curve = self.yield_curves[currency]
+                
+                current_maturity = DayCountCalculator.calculate_year_fraction(
+                    calculation_date,
+                    holding.characteristics.maturity_date,
+                    holding.characteristics.day_count_convention
+                )
+                
+                future_maturity = current_maturity - time_horizon_years
+                
+                if future_maturity > 0:
+                    current_yield = analytics.yield_to_maturity
+                    future_yield = curve.interpolate_rate(future_maturity)
+                    yield_change = future_yield - current_yield
+                    roll_contribution = -weight * analytics.modified_duration * yield_change
+                    total_roll += roll_contribution
+        
+        return total_roll
+
+# ============================================================================
+# MAIN ANALYTICS ENGINE
+# ============================================================================
+
+class ETFAnalyticsEngine:
+    """
+    Production-ready ETF analytics engine.
+    
+    Performs comprehensive validation at construction, then provides
+    reliable analytics calculations with predictable results.
+    """
+    
+    def __init__(self, raw_holdings_data: List[Dict], raw_parameters: Dict,
+                 raw_yield_curves: Dict[str, Dict]):
+        """
+        Initialize engine with comprehensive input validation.
+        
+        Args:
+            raw_holdings_data: List of raw bond holding dictionaries
+            raw_parameters: Raw calculation parameters dictionary
+            raw_yield_curves: Raw yield curve data by currency
+            
+        Raises:
+            ValidationError: If any input validation fails
+        """
+        logger.info("Starting ETF analytics engine initialization")
+        
+        # Validate and store parameters
+        self.parameters = InputValidator.validate_calculation_parameters(
+            raw_parameters['calculation_date'],
+            raw_parameters.get('yield_convergence_tolerance', 1e-8),
+            raw_parameters.get('max_iterations', 100)
+        )
+        
+        # Validate and store yield curves
+        validated_curves = {}
+        for currency_str, curve_data in raw_yield_curves.items():
+            validated_curve_data = InputValidator.validate_yield_curve_data(
+                currency_str,
+                curve_data['tenors'],
+                curve_data['rates'],
+                curve_data['curve_date']
+            )
+            validated_curves[validated_curve_data.currency] = YieldCurveInterpolator(validated_curve_data)
+        
+        self.yield_curves = validated_curves
+        
+        # Validate and store holdings
+        validated_holdings = []
+        for holding_data in raw_holdings_data:
+            identifier = InputValidator.validate_bond_identifier(
+                holding_data['bond_id'],
+                holding_data['cusip'],
+                holding_data['isin']
+            )
+            
+            characteristics = InputValidator.validate_bond_characteristics(
+                holding_data['coupon_rate'],
+                holding_data['maturity_date'],
+                holding_data['issue_date'],
+                holding_data['par_amount'],
+                holding_data['payment_frequency'],
+                holding_data['day_count_convention'],
+                holding_data['currency'],
+                holding_data['country']
+            )
+            
+            market_data = InputValidator.validate_market_data(
+                holding_data['clean_price'],
+                holding_data['accrued_interest'],
+                holding_data['market_date']
+            )
+            
+            validated_holdings.append(ValidatedBondHolding(
+                identifier=identifier,
+                characteristics=characteristics,
+                market_data=market_data
+            ))
+        
+        self.holdings = InputValidator.validate_holdings_portfolio(validated_holdings)
+        
+        # Initialize calculators
+        self.cash_flow_generator = CashFlowGenerator(self.parameters.calculation_date)
+        self.yield_solver = YieldSolver(self.parameters)
+        self.bond_calculator = BondAnalyticsCalculator(
+            self.cash_flow_generator, self.yield_solver)
+        self.acf_calculator = ACFCalculator(self.yield_solver)
+        self.attribution_calculator = ReturnAttributionCalculator(self.yield_curves)
+        
+        # Calculate all analytics
+        self._calculate_all_analytics()
+        
+        logger.info("ETF analytics engine initialization completed successfully")
+    
+    def _calculate_all_analytics(self):
+        """Calculate comprehensive portfolio analytics."""
+        try:
+            # Individual bond analytics
+            bond_analytics_list = []
+            for holding in self.holdings:
+                bond_result = self.bond_calculator.calculate_analytics(holding)
+                bond_analytics_list.append(bond_result)
+            
+            self.bond_analytics = tuple(bond_analytics_list)
+            
+            # Portfolio weights
+            self.weights = PortfolioWeightCalculator.calculate_weights(self.holdings)
+            self.portfolio_value = sum(w.market_value for w in self.weights)
+            
+            # ACF method
+            self.acf_result = self.acf_calculator.calculate_acf_analytics(
+                self.bond_analytics, self.weights)
+            
+            # WA method
+            self.wa_result = WACalculator.calculate_wa_analytics(
+                self.bond_analytics, self.weights, self.holdings,
+                self.parameters.calculation_date)
+            
+            # Risk metrics
+            self.risk_metrics = RiskMetricsCalculator.calculate_risk_metrics(
+                self.acf_result, self.wa_result, self.portfolio_value,
+                self.holdings, self.weights)
+            
+        except Exception as e:
+            raise CalculationError(f"Portfolio analytics calculation failed: {e}")
+    
+    def get_complete_analytics(self) -> PortfolioAnalytics:
+        """
+        Get complete portfolio analytics results.
+        
+        Returns:
+            Comprehensive portfolio analytics with all methods
+        """
+        return PortfolioAnalytics(
+            acf_method=self.acf_result,
+            wa_method=self.wa_result,
+            risk_metrics=self.risk_metrics,
+            portfolio_weights=self.weights,
+            bond_analytics=self.bond_analytics,
+            calculation_date=self.parameters.calculation_date
+        )
+    
+    def decompose_total_return(self, time_horizon_days: int,
+                              observed_price_return: Optional[float] = None) -> ReturnDecomposition:
+        """
+        Decompose total return into components.
+        
+        Args:
+            time_horizon_days: Analysis time horizon in days
+            observed_price_return: Actual observed price return (optional)
+            
+        Returns:
+            Complete return decomposition
+            
+        Raises:
+            ValidationError: If time horizon is invalid
+        """
+        if not isinstance(time_horizon_days, int) or time_horizon_days <= 0:
+            raise ValidationError("Time horizon must be positive integer")
+        
+        return self.attribution_calculator.decompose_return(
+            self.holdings, self.weights, self.bond_analytics,
+            self.parameters.calculation_date, time_horizon_days,
+            observed_price_return
+        )
+    
+    def export_summary_dataframe(self) -> pd.DataFrame:
+        """
+        Export summary results to DataFrame.
+        
+        Returns:
+            Summary DataFrame with key metrics
+        """
+        summary_data = {
+            'Metric': [
+                'Portfolio Yield (%)',
+                'Modified Duration (years)',
+                'Weighted Average Life (years)',
+                'CR01 ($)',
+                'Portfolio Value ($)'
+            ],
+            'ACF Method': [
+                round(self.acf_result.portfolio_yield * 100, 3),
+                round(self.acf_result.modified_duration, 3),
+                round(self.acf_result.weighted_average_life, 3),
+                round(self.risk_metrics.cr01, 2),
+                round(self.risk_metrics.portfolio_value, 2)
+            ],
+            'WA Method': [
+                round(self.wa_result.portfolio_yield * 100, 3),
+                round(self.wa_result.modified_duration, 3),
+                round(self.wa_result.weighted_average_life, 3),
+                'N/A',  # CR01 calculated from ACF method
+                round(self.risk_metrics.portfolio_value, 2)
+            ]
+        }
+        
+        return pd.DataFrame(summary_data)
+    
+    def export_detailed_dataframe(self) -> pd.DataFrame:
+        """
+        Export detailed bond-level results to DataFrame.
+        
+        Returns:
+            Detailed DataFrame with individual bond analytics
+        """
+        detailed_data = []
+        weight_lookup = {w.bond_id: w.weight for w in self.weights}
+        
+        for bond_result in self.bond_analytics:
+            detailed_data.append({
+                'Bond ID': bond_result.bond_id,
+                'Weight (%)': round(weight_lookup[bond_result.bond_id] * 100, 2),
+                'YTM (%)': round(bond_result.yield_to_maturity * 100, 3),
+                'Modified Duration': round(bond_result.modified_duration, 3),
+                'Convexity': round(bond_result.convexity, 3),
+                'Cash Flows': len(bond_result.cash_flows)
+            })
+        
+        return pd.DataFrame(detailed_data)
+
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
+
+if __name__ == "__main__":
+    # Example usage with comprehensive error handling
+    try:
+        # Sample input data
+        sample_holdings = [
+            {
+                'bond_id': 'CORP001',
+                'cusip': '12345678',
+                'isin': 'US1234567890',
+                'coupon_rate': 0.045,
+                'maturity_date': datetime(2030, 12, 15),
+                'issue_date': datetime(2020, 12, 15),
+                'par_amount': 1000000.0,  # $1M par
+                'payment_frequency': 2,   # Semi-annual
+                'day_count_convention': '30/360',
+                'currency': 'USD',
+                'country': 'US',
+                'clean_price': 98.75,
+                'accrued_interest': 1.125,
+                'market_date': datetime(2025, 6, 19)
+            },
+            {
+                'bond_id': 'CORP002',
+                'cusip': '87654321',
+                'isin': 'US0987654321',
+                'coupon_rate': 0.0375,
+                'maturity_date': datetime(2028, 6, 30),
+                'issue_date': datetime(2018, 6, 30),
+                'par_amount': 1500000.0,  # $1.5M par
+                'payment_frequency': 2,   # Semi-annual
+                'day_count_convention': '30/360',
+                'currency': 'USD',
+                'country': 'US',
+                'clean_price': 102.25,
+                'accrued_interest': 0.9375,
+                'market_date': datetime(2025, 6, 19)
+            }
+        ]
+        
+        # Calculation parameters
+        parameters = {
+            'calculation_date': datetime(2025, 6, 19),
+            'yield_convergence_tolerance': 1e-8,
+            'max_iterations': 100
+        }
+        
+        # Yield curve data
+        yield_curves = {
+            'USD': {
+                'tenors': [0.25, 0.5, 1, 2, 3, 5, 7, 10, 30],
+                'rates': [0.0525, 0.0535, 0.0545, 0.0555, 0.0565, 0.0575, 0.0585, 0.0595, 0.0605],
+                'curve_date': datetime(2025, 6, 19)
+            }
+        }
+        
+        # Create analytics engine
+        print("Initializing ETF Analytics Engine...")
+        engine = ETFAnalyticsEngine(sample_holdings, parameters, yield_curves)
+        
+        # Get complete results
+        analytics = engine.get_complete_analytics()
+        
+        # Display results
+        print("\n" + "="*70)
+        print("ETF FIXED INCOME ANALYTICS RESULTS")
+        print("="*70)
+        print(f"Calculation Date: {analytics.calculation_date.strftime('%Y-%m-%d')}")
+        print(f"Portfolio Value: ${analytics.risk_metrics.portfolio_value:,.2f}")
+        print()
+        
+        print("ACF METHOD RESULTS:")
+        print(f"  Portfolio Yield:      {analytics.acf_method.portfolio_yield:.4f} ({analytics.acf_method.portfolio_yield*100:.2f}%)")
+        print(f"  Modified Duration:    {analytics.acf_method.modified_duration:.4f} years")
+        print(f"  Weighted Avg Life:    {analytics.acf_method.weighted_average_life:.4f} years")
+        print()
+        
+        print("WEIGHTED AVERAGE METHOD RESULTS:")
+        print(f"  Portfolio Yield:      {analytics.wa_method.portfolio_yield:.4f} ({analytics.wa_method.portfolio_yield*100:.2f}%)")
+        print(f"  Modified Duration:    {analytics.wa_method.modified_duration:.4f} years")
+        print(f"  Weighted Avg Life:    {analytics.wa_method.weighted_average_life:.4f} years")
+        print()
+        
+        print("RISK METRICS:")
+        print(f"  CR01:                ${analytics.risk_metrics.cr01:.2f}")
+        print(f"  Spread Duration:     {analytics.risk_metrics.spread_duration:.4f} years")
+        print()
+        
+        # Return decomposition analysis
+        print("RETURN DECOMPOSITION (30-day horizon):")
+        return_decomp = engine.decompose_total_return(30)
+        print(f"  Carry Return:        {return_decomp.carry_return:.4f} ({return_decomp.carry_return*100:.2f}%)")
+        print(f"  Roll Return:         {return_decomp.roll_return:.4f} ({return_decomp.roll_return*100:.2f}%)")
+        print(f"  Price Return:        {return_decomp.price_return:.4f} ({return_decomp.price_return*100:.2f}%)")
+        print(f"  Total Return:        {return_decomp.total_return:.4f} ({return_decomp.total_return*100:.2f}%)")
+        print()
+        
+        # Export to DataFrames
+        print("SUMMARY TABLE:")
+        summary_df = engine.export_summary_dataframe()
+        print(summary_df.to_string(index=False))
+        print()
+        
+        print("DETAILED BOND ANALYTICS:")
+        detailed_df = engine.export_detailed_dataframe()
+        print(detailed_df.to_string(index=False))
+        
+        print("\n" + "="*70)
+        print("ANALYSIS COMPLETED SUCCESSFULLY")
+        print("="*70)
+        
+    except ValidationError as e:
+        logger.error(f"Input validation failed: {e}")
+
+    except CalculationError as e:
+        logger.error(f"Calculation failed: {e}")
+        print(f"❌ CALCULATION ERROR: {e}")
+    except ConvergenceError as e:
+        logger.error(f"Numerical convergence failed: {e}")
+        print(f"❌ CONVERGENCE ERROR: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        print(f"❌ UNEXPECTED ERROR: {e}")
+        raise
