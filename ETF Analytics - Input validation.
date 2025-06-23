@@ -1,0 +1,170 @@
+"""
+ETF Analytics - Input validation.
+"""
+
+from datetime import datetime
+from typing import List, Tuple
+
+from .types import DayCountConvention, PaymentFrequency, Currency, ValidationError
+from .models import (
+    ValidatedBondIdentifier, ValidatedBondCharacteristics, ValidatedMarketData,
+    ValidatedBondHolding, ValidatedYieldCurveData, ValidatedCalculationParameters
+)
+
+
+class InputValidator:
+    @staticmethod
+    def validate_bond_identifier(bond_id: str, cusip: str, isin: str) -> ValidatedBondIdentifier:
+        if not isinstance(bond_id, str) or not bond_id.strip():
+            raise ValidationError("Bond ID must be non-empty string")
+        if not isinstance(cusip, str) or not cusip.strip():
+            raise ValidationError("CUSIP must be non-empty string")
+        if not isinstance(isin, str) or not isin.strip():
+            raise ValidationError("ISIN must be non-empty string")
+        return ValidatedBondIdentifier(
+            bond_id=bond_id.strip(),
+            cusip=cusip.strip(),
+            isin=isin.strip()
+        )
+
+    @staticmethod
+    def validate_bond_characteristics(
+        coupon_rate: float,
+        maturity_date: datetime,
+        issue_date: datetime,
+        par_amount: float,
+        payment_frequency: int,
+        day_count_convention: str,
+        currency: str,
+        country: str
+    ) -> ValidatedBondCharacteristics:
+        if not isinstance(coupon_rate, (int, float)) or coupon_rate < 0:
+            raise ValidationError(f"Coupon rate must be non-negative number, got {coupon_rate}")
+        if not isinstance(par_amount, (int, float)) or par_amount <= 0:
+            raise ValidationError(f"Par amount must be positive number, got {par_amount}")
+        if not isinstance(maturity_date, datetime):
+            raise ValidationError("Maturity date must be datetime object")
+        if not isinstance(issue_date, datetime):
+            raise ValidationError("Issue date must be datetime object")
+        if maturity_date <= issue_date:
+            raise ValidationError("Maturity date must be after issue date")
+        
+        try:
+            freq_enum = PaymentFrequency(payment_frequency)
+        except ValueError:
+            raise ValidationError(f"Invalid payment frequency: {payment_frequency}")
+        
+        try:
+            convention_enum = DayCountConvention(day_count_convention)
+        except ValueError:
+            raise ValidationError(f"Invalid day count convention: {day_count_convention}")
+        
+        try:
+            currency_enum = Currency(currency)
+        except ValueError:
+            raise ValidationError(f"Invalid currency: {currency}")
+        
+        if not isinstance(country, str) or not country.strip():
+            raise ValidationError("Country must be non-empty string")
+        
+        return ValidatedBondCharacteristics(
+            coupon_rate=float(coupon_rate),
+            maturity_date=maturity_date,
+            issue_date=issue_date,
+            par_amount=float(par_amount),
+            payment_frequency=freq_enum,
+            day_count_convention=convention_enum,
+            currency=currency_enum,
+            country=country.strip()
+        )
+
+    @staticmethod
+    def validate_market_data(
+        clean_price: float,
+        accrued_interest: float,
+        market_date: datetime
+    ) -> ValidatedMarketData:
+        if not isinstance(clean_price, (int, float)) or clean_price <= 0:
+            raise ValidationError(f"Clean price must be positive number, got {clean_price}")
+        if not isinstance(accrued_interest, (int, float)) or accrued_interest < 0:
+            raise ValidationError(f"Accrued interest must be non-negative, got {accrued_interest}")
+        if not isinstance(market_date, datetime):
+            raise ValidationError("Market date must be datetime object")
+        
+        return ValidatedMarketData(
+            clean_price=float(clean_price),
+            accrued_interest=float(accrued_interest),
+            market_date=market_date
+        )
+
+    @staticmethod
+    def validate_calculation_parameters(
+        calculation_date: datetime,
+        yield_convergence_tolerance: float,
+        max_iterations: int,
+        yield_solver_bounds: Tuple[float, float]
+    ) -> ValidatedCalculationParameters:
+        if not isinstance(calculation_date, datetime):
+            raise ValidationError("Calculation date must be datetime object")
+        if not isinstance(yield_convergence_tolerance, (int, float)) or yield_convergence_tolerance <= 0:
+            raise ValidationError("Yield convergence tolerance must be positive number")
+        if not isinstance(max_iterations, int) or max_iterations <= 0:
+            raise ValidationError("Max iterations must be positive integer")
+        if not isinstance(yield_solver_bounds, tuple) or len(yield_solver_bounds) != 2:
+            raise ValidationError("Yield solver bounds must be a tuple of two numbers")
+        if not all(isinstance(x, (int, float)) for x in yield_solver_bounds):
+            raise ValidationError("Yield solver bounds must be a tuple of two numbers")
+        
+        return ValidatedCalculationParameters(
+            calculation_date=calculation_date,
+            yield_convergence_tolerance=float(yield_convergence_tolerance),
+            max_iterations=max_iterations,
+            yield_solver_bounds=yield_solver_bounds
+        )
+
+    @staticmethod
+    def validate_yield_curve_data(
+        currency: str,
+        tenors: List[float],
+        rates: List[float],
+        curve_date: datetime
+    ) -> ValidatedYieldCurveData:
+        try:
+            currency_enum = Currency(currency)
+        except ValueError:
+            raise ValidationError(f"Invalid currency: {currency}")
+        
+        if not isinstance(curve_date, datetime):
+            raise ValidationError("Curve date must be datetime object")
+        if not isinstance(tenors, list) or len(tenors) < 2:
+            raise ValidationError("Tenors must be list with at least 2 points")
+        if not isinstance(rates, list) or len(rates) != len(tenors):
+            raise ValidationError("Rates must be list same length as tenors")
+        
+        validated_tenors = [float(t) for t in tenors]
+        validated_rates = [float(r) for r in rates]
+        
+        if not all(t1 < t2 for t1, t2 in zip(validated_tenors[:-1], validated_tenors[1:])):
+            raise ValidationError("Tenors must be in strictly ascending order")
+        
+        return ValidatedYieldCurveData(
+            currency=currency_enum,
+            tenors=tuple(validated_tenors),
+            rates=tuple(validated_rates),
+            curve_date=curve_date
+        )
+
+    @staticmethod
+    def validate_holdings_portfolio(holdings: List[ValidatedBondHolding]) -> Tuple[ValidatedBondHolding, ...]:
+        if not isinstance(holdings, list) or len(holdings) == 0:
+            raise ValidationError("Holdings must be non-empty list")
+        if not all(isinstance(h, ValidatedBondHolding) for h in holdings):
+            raise ValidationError("All items in holdings must be ValidatedBondHolding")
+        
+        bond_ids = [h.identifier.bond_id for h in holdings]
+        if len(bond_ids) != len(set(bond_ids)):
+            raise ValidationError("All bond IDs must be unique in portfolio")
+        if sum(h.market_value for h in holdings) <= 0:
+            raise ValidationError("Portfolio total value must be positive")
+        
+        return tuple(holdings)
