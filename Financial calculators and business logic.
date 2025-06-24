@@ -1,0 +1,450 @@
+"""
+ETF Analytics - Financial calculators and business logic.
+"""
+
+import numpy as np
+from datetime import datetime
+from typing import Dict, List, Tuple
+from scipy.optimize import brentq
+
+from .types import DayCountConvention, Currency, CalculationError, ConvergenceError
+from .models import (
+    ValidatedBondHolding, ValidatedBondCharacteristics, ValidatedYieldCurveData,
+    ValidatedCalculationParameters, CashFlow, BondAnalyticsResult, PortfolioWeight,
+    ACFResult, WAResult, RiskMetrics, ReturnDecomposition
+)
+
+
+class DayCountCalculator:
+    """Day count fraction calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_year_fraction(
+        start_date: datetime,
+        end_date: datetime,
+        convention: DayCountConvention
+    ) -> float:
+        if convention == DayCountConvention.THIRTY_360:
+            return DayCountCalculator._calculate_30_360(start_date, end_date)
+        elif convention == DayCountConvention.ACT_360:
+            return (end_date - start_date).days / 360.0
+        elif convention == DayCountConvention.ACT_365:
+            return (end_date - start_date).days / 365.0
+        elif convention == DayCountConvention.ACT_ACT:
+            return (end_date - start_date).days / 365.25
+        else:
+            raise CalculationError(f"Unsupported day count convention: {convention}")
+    
+    @staticmethod
+    def _calculate_30_360(start_date: datetime, end_date: datetime) -> float:
+        y1, m1, d1 = start_date.year, start_date.month, start_date.day
+        y2, m2, d2 = end_date.year, end_date.month, end_date.day
+        if d1 == 31:
+            d1 = 30
+        if d2 == 31 and d1 == 30:
+            d2 = 30
+        return ((y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)) / 360.0
+
+
+class YieldCurveInterpolator:
+    """Yield curve interpolation. Assumes validated data."""
+    
+    def __init__(self, curve_data: ValidatedYieldCurveData):
+        self.curve_data = curve_data
+    
+    def interpolate_rate(self, tenor: float) -> float:
+        return float(np.interp(tenor, self.curve_data.tenors, self.curve_data.rates))
+
+
+class CashFlowGenerator:
+    """Generates bond cash flows. Assumes validated inputs."""
+    
+    def __init__(self, calculation_date: datetime):
+        self.calculation_date = calculation_date
+    
+    def generate_cash_flows(self, bond: ValidatedBondHolding) -> Tuple[CashFlow, ...]:
+        payment_dates = self._generate_payment_dates(bond.characteristics)
+        frequency = bond.characteristics.payment_frequency.value
+        coupon_amount = (bond.characteristics.par_amount * bond.characteristics.coupon_rate / frequency)
+        
+        cash_flows = []
+        for payment_date in payment_dates:
+            if payment_date > self.calculation_date:
+                time_to_payment = DayCountCalculator.calculate_year_fraction(
+                    self.calculation_date, payment_date, bond.characteristics.day_count_convention)
+                
+                is_principal = (payment_date == bond.characteristics.maturity_date)
+                amount = coupon_amount
+                if is_principal:
+                    amount += bond.characteristics.par_amount
+                
+                cash_flows.append(CashFlow(
+                    date=payment_date,
+                    amount=amount,
+                    time_to_payment=time_to_payment,
+                    is_principal=(is_principal and bond.characteristics.par_amount > 0)
+                ))
+        return tuple(cash_flows)
+    
+    def _generate_payment_dates(self, characteristics: ValidatedBondCharacteristics) -> List[datetime]:
+        payment_dates = []
+        frequency = characteristics.payment_frequency.value
+        months_between = 12 // frequency
+        current_date = characteristics.maturity_date
+        
+        while current_date >= characteristics.issue_date:
+            payment_dates.append(current_date)
+            year_delta, month_delta = divmod(months_between, 12)
+            current_date = current_date.replace(year=current_date.year - year_delta)
+            if current_date.month <= month_delta:
+                current_date = current_date.replace(
+                    year=current_date.year - 1, 
+                    month=current_date.month + 12 - month_delta
+                )
+            else:
+                current_date = current_date.replace(month=current_date.month - month_delta)
+        return sorted(payment_dates)
+
+
+class YieldSolver:
+    """Numerical yield calculations. Assumes validated inputs."""
+    
+    def __init__(self, parameters: ValidatedCalculationParameters):
+        self.parameters = parameters
+    
+    def solve_bond_ytm(self, cash_flows: Tuple[CashFlow, ...], dirty_price: float) -> float:
+        """Solve yield to maturity using Brent's method."""
+        def price_function(ytm: float) -> float:
+            par_amount = next((cf.amount for cf in reversed(cash_flows) if cf.is_principal), 100.0)
+            calculated_price = sum(
+                (cf.amount / par_amount * 100.0) / (1 + ytm) ** cf.time_to_payment
+                for cf in cash_flows
+            )
+            return calculated_price - dirty_price
+        
+        try:
+            ytm = brentq(
+                price_function,
+                self.parameters.yield_solver_bounds[0],
+                self.parameters.yield_solver_bounds[1],
+                xtol=self.parameters.yield_convergence_tolerance,
+                maxiter=self.parameters.max_iterations
+            )
+            return ytm
+        except (ValueError, RuntimeError) as e:
+            raise ConvergenceError(f"Bond YTM solution failed: {e}")
+    
+    def solve_portfolio_yield(self, aggregated_cash_flows: Dict[float, List[float]]) -> float:
+        """Solve portfolio yield using Brent's method."""
+        def price_function(y: float) -> float:
+            return sum(cf_amounts[0] / (1 + y) ** time
+                      for time, cf_amounts in aggregated_cash_flows.items()) - 1.0
+        
+        try:
+            ytm = brentq(
+                price_function,
+                self.parameters.yield_solver_bounds[0],
+                self.parameters.yield_solver_bounds[1],
+                xtol=self.parameters.yield_convergence_tolerance,
+                maxiter=self.parameters.max_iterations
+            )
+            return ytm
+        except (ValueError, RuntimeError) as e:
+            raise ConvergenceError(f"Portfolio ACF yield solution failed: {e}")
+
+
+class BondAnalyticsCalculator:
+    """Individual bond analytics. Assumes validated inputs."""
+    
+    def __init__(self, cash_flow_generator: CashFlowGenerator, yield_solver: YieldSolver):
+        self.cash_flow_generator = cash_flow_generator
+        self.yield_solver = yield_solver
+    
+    def calculate_analytics(self, bond: ValidatedBondHolding) -> BondAnalyticsResult:
+        try:
+            cash_flows = self.cash_flow_generator.generate_cash_flows(bond)
+            ytm = self.yield_solver.solve_bond_ytm(cash_flows, bond.market_data.dirty_price)
+            modified_duration = self._calculate_modified_duration(cash_flows, ytm, bond)
+            convexity = self._calculate_convexity(cash_flows, ytm, bond)
+            return BondAnalyticsResult(
+                bond_id=bond.identifier.bond_id,
+                yield_to_maturity=ytm,
+                modified_duration=modified_duration,
+                convexity=convexity,
+                cash_flows=cash_flows
+            )
+        except ConvergenceError:
+            raise
+        except Exception as e:
+            raise CalculationError(f"Bond analytics failed for {bond.identifier.bond_id}: {e}")
+    
+    def _calculate_modified_duration(
+        self,
+        cash_flows: Tuple[CashFlow, ...],
+        ytm: float,
+        bond: ValidatedBondHolding
+    ) -> float:
+        """Calculate modified duration using the standard formula."""
+        price = bond.market_data.dirty_price * bond.characteristics.par_amount / 100.0
+        if price <= 0:
+            return 0.0
+        
+        macaulay_duration_times_price = sum(
+            cf.time_to_payment * cf.amount / (1 + ytm) ** cf.time_to_payment
+            for cf in cash_flows
+        )
+        
+        macaulay_duration = macaulay_duration_times_price / price
+        return macaulay_duration / (1 + ytm)
+    
+    def _calculate_convexity(
+        self,
+        cash_flows: Tuple[CashFlow, ...],
+        ytm: float,
+        bond: ValidatedBondHolding
+    ) -> float:
+        """Calculate convexity using the standard formula."""
+        price = bond.market_data.dirty_price * bond.characteristics.par_amount / 100.0
+        if price <= 0:
+            return 0.0
+        
+        convexity_sum = sum(
+            cf.amount * cf.time_to_payment * (cf.time_to_payment + 1) /
+            (1 + ytm) ** (cf.time_to_payment + 2)
+            for cf in cash_flows
+        )
+        return convexity_sum / price
+
+
+class PortfolioWeightCalculator:
+    """Portfolio weight calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_weights(holdings: Tuple[ValidatedBondHolding, ...]) -> Tuple[PortfolioWeight, ...]:
+        total_value = sum(holding.market_value for holding in holdings)
+        if total_value <= 0:
+            return tuple()
+        
+        return tuple(
+            PortfolioWeight(
+                bond_id=holding.identifier.bond_id,
+                weight=holding.market_value / total_value,
+                market_value=holding.market_value
+            )
+            for holding in holdings
+        )
+
+
+class ACFCalculator:
+    """ACF method calculations. Assumes validated inputs."""
+    
+    def __init__(self, yield_solver: YieldSolver):
+        self.yield_solver = yield_solver
+    
+    def calculate_acf_analytics(
+        self,
+        bond_analytics: Tuple[BondAnalyticsResult, ...],
+        weights: Tuple[PortfolioWeight, ...],
+        holdings: Tuple[ValidatedBondHolding, ...]
+    ) -> ACFResult:
+        try:
+            weight_lookup = {w.bond_id: w.weight for w in weights}
+            holdings_lookup = {h.identifier.bond_id: h for h in holdings}
+            
+            aggregated_cf: Dict[float, List[float]] = {}
+            
+            for bond_result in bond_analytics:
+                weight = weight_lookup.get(bond_result.bond_id)
+                holding = holdings_lookup.get(bond_result.bond_id)
+                if weight is None or holding is None:
+                    continue
+
+                for cf in bond_result.cash_flows:
+                    time_key = round(cf.time_to_payment, 6)
+                    if time_key not in aggregated_cf:
+                        aggregated_cf[time_key] = [0.0, 0.0]
+                    
+                    scaled_amount = (cf.amount / holding.characteristics.par_amount) * weight
+                    aggregated_cf[time_key][0] += scaled_amount
+                    
+                    if cf.is_principal:
+                        scaled_principal = (holding.characteristics.par_amount / holding.characteristics.par_amount) * weight
+                        aggregated_cf[time_key][1] += scaled_principal
+
+            portfolio_yield = self.yield_solver.solve_portfolio_yield(aggregated_cf)
+            modified_duration = self._calculate_acf_duration(aggregated_cf, portfolio_yield)
+            wal = self._calculate_acf_wal(aggregated_cf)
+            
+            return ACFResult(
+                portfolio_yield=portfolio_yield,
+                modified_duration=modified_duration,
+                weighted_average_life=wal,
+                aggregated_cash_flows=aggregated_cf
+            )
+        except ConvergenceError:
+            raise
+        except Exception as e:
+            raise CalculationError(f"ACF calculation failed: {e}")
+    
+    def _calculate_acf_duration(self, aggregated_cf: Dict[float, List[float]], portfolio_yield: float) -> float:
+        """Calculate ACF modified duration."""
+        macaulay_duration_times_price = sum(
+            time * cf_amounts[0] / (1 + portfolio_yield) ** time
+            for time, cf_amounts in aggregated_cf.items()
+        )
+        
+        price = sum(
+            cf_amounts[0] / (1 + portfolio_yield) ** time
+            for time, cf_amounts in aggregated_cf.items()
+        )
+        
+        if price <= 0:
+            return 0.0
+        macaulay_duration = macaulay_duration_times_price / price
+        return macaulay_duration / (1 + portfolio_yield)
+    
+    def _calculate_acf_wal(self, aggregated_cf: Dict[float, List[float]]) -> float:
+        """Calculate ACF weighted average life using only principal cash flows."""
+        total_principal = sum(cf_amounts[1] for cf_amounts in aggregated_cf.values())
+        if total_principal <= 0:
+            return 0.0
+        
+        weighted_time = sum(time * cf_amounts[1] for time, cf_amounts in aggregated_cf.items())
+        return weighted_time / total_principal
+
+
+class WACalculator:
+    """Weighted Average method calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_wa_analytics(
+        bond_analytics: Tuple[BondAnalyticsResult, ...],
+        weights: Tuple[PortfolioWeight, ...],
+        holdings: Tuple[ValidatedBondHolding, ...],
+        calculation_date: datetime
+    ) -> WAResult:
+        weight_lookup = {w.bond_id: w.weight for w in weights}
+        analytics_lookup = {ba.bond_id: ba for ba in bond_analytics}
+        wa_yield, wa_duration, wa_wal = 0.0, 0.0, 0.0
+        
+        for holding in holdings:
+            bond_id = holding.identifier.bond_id
+            weight = weight_lookup.get(bond_id, 0.0)
+            analytics = analytics_lookup.get(bond_id)
+            if not analytics:
+                continue
+            
+            time_to_maturity = DayCountCalculator.calculate_year_fraction(
+                calculation_date,
+                holding.characteristics.maturity_date,
+                holding.characteristics.day_count_convention
+            )
+            
+            wa_yield += weight * analytics.yield_to_maturity
+            wa_duration += weight * analytics.modified_duration
+            wa_wal += weight * time_to_maturity
+        
+        return WAResult(
+            portfolio_yield=wa_yield,
+            modified_duration=wa_duration,
+            weighted_average_life=wa_wal
+        )
+
+
+class RiskMetricsCalculator:
+    """Risk metrics calculations. Assumes validated inputs."""
+    
+    @staticmethod
+    def calculate_risk_metrics(acf_result: ACFResult, portfolio_value: float) -> RiskMetrics:
+        cr01 = acf_result.modified_duration * portfolio_value * 0.0001
+        wa_spread = 0.0
+        return RiskMetrics(
+            cr01=cr01,
+            spread_duration=acf_result.modified_duration,
+            portfolio_value=portfolio_value,
+            weighted_average_spread=wa_spread
+        )
+
+
+class ReturnAttributionCalculator:
+    """Return attribution calculations. Assumes validated inputs."""
+    
+    def __init__(self, yield_curves: Dict[Currency, YieldCurveInterpolator]):
+        self.yield_curves = yield_curves
+    
+    def decompose_return(
+        self,
+        holdings: Tuple[ValidatedBondHolding, ...],
+        weights: Tuple[PortfolioWeight, ...],
+        bond_analytics: Tuple[BondAnalyticsResult, ...],
+        calculation_date: datetime,
+        time_horizon_days: int
+    ) -> ReturnDecomposition:
+        carry = self._calculate_carry(bond_analytics, weights, time_horizon_days)
+        roll = self._calculate_roll(holdings, weights, bond_analytics, calculation_date, time_horizon_days)
+        price_return = 0.0
+        total_return = carry + roll + price_return
+        
+        return ReturnDecomposition(
+            carry_return=carry,
+            roll_return=roll,
+            price_return=price_return,
+            total_return=total_return,
+            time_horizon_days=time_horizon_days
+        )
+    
+    def _calculate_carry(
+        self,
+        bond_analytics: Tuple[BondAnalyticsResult, ...],
+        weights: Tuple[PortfolioWeight, ...],
+        time_horizon_days: int
+    ) -> float:
+        """Calculate carry based on Yield-to-Maturity."""
+        time_horizon_years = time_horizon_days / 365.0
+        weight_lookup = {w.bond_id: w.weight for w in weights}
+        analytics_lookup = {ba.bond_id: ba for ba in bond_analytics}
+        
+        total_carry = sum(
+            weight_lookup.get(bond_id, 0.0) * analytics.yield_to_maturity * time_horizon_years
+            for bond_id, analytics in analytics_lookup.items()
+        )
+        return total_carry
+    
+    def _calculate_roll(
+        self,
+        holdings: Tuple[ValidatedBondHolding, ...],
+        weights: Tuple[PortfolioWeight, ...],
+        bond_analytics: Tuple[BondAnalyticsResult, ...],
+        calculation_date: datetime,
+        time_horizon_days: int
+    ) -> float:
+        """Calculate roll by comparing points on the same yield curve."""
+        time_horizon_years = time_horizon_days / 365.0
+        weight_lookup = {w.bond_id: w.weight for w in weights}
+        analytics_lookup = {ba.bond_id: ba for ba in bond_analytics}
+        total_roll = 0.0
+        
+        for holding in holdings:
+            bond_id = holding.identifier.bond_id
+            weight = weight_lookup.get(bond_id, 0.0)
+            analytics = analytics_lookup.get(bond_id)
+            currency = holding.characteristics.currency
+            if not analytics or currency not in self.yield_curves:
+                continue
+                
+            curve = self.yield_curves[currency]
+            current_maturity = DayCountCalculator.calculate_year_fraction(
+                calculation_date,
+                holding.characteristics.maturity_date,
+                holding.characteristics.day_count_convention
+            )
+            future_maturity = current_maturity - time_horizon_years
+            
+            if future_maturity > 0:
+                current_yield_on_curve = curve.interpolate_rate(current_maturity)
+                future_yield_on_curve = curve.interpolate_rate(future_maturity)
+                yield_change_from_roll = future_yield_on_curve - current_yield_on_curve
+                roll_contribution = -weight * analytics.modified_duration * yield_change_from_roll
+                total_roll += roll_contribution
+        
+        return total_roll
