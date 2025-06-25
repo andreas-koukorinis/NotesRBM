@@ -1,0 +1,75 @@
+import pytest
+import pandas as pd
+from datetime import datetime
+from .etfanalytics import ETFAnalyticsEngine, ValidationError
+from .models import PortfolioAnalytics, ReturnDecomposition
+
+def sample_inputs():
+    holdings = [
+        {'bond_id': 'B1', 'cusip': '11111111', 'isin': 'US0000000001', 'coupon_rate': 0.05, 'maturity_date': datetime(2030, 1, 1), 'issue_date': datetime(2020, 1, 1), 'par_amount': 1000.0, 'payment_frequency': 2, 'day_count_convention': '30/360', 'currency': 'USD', 'country': 'US', 'clean_price': 100.0, 'accrued_interest': 0.0, 'market_date': datetime(2025, 1, 1)},
+        {'bond_id': 'B2', 'cusip': '22222222', 'isin': 'US0000000002', 'coupon_rate': 0.04, 'maturity_date': datetime(2031, 1, 1), 'issue_date': datetime(2021, 1, 1), 'par_amount': 2000.0, 'payment_frequency': 2, 'day_count_convention': '30/360', 'currency': 'USD', 'country': 'US', 'clean_price': 101.0, 'accrued_interest': 0.5, 'market_date': datetime(2025, 1, 1)}
+    ]
+    parameters = {'calculation_date': datetime(2025, 1, 1)}
+    yield_curves = {'USD': {'tenors': [0.5, 1, 2, 5, 10], 'rates': [0.03, 0.035, 0.04, 0.045, 0.05], 'curve_date': datetime(2025, 1, 1)}}
+    return holdings, parameters, yield_curves
+
+def test_engine_construction_and_analytics():
+    holdings, parameters, yield_curves = sample_inputs()
+    engine = ETFAnalyticsEngine(holdings, parameters, yield_curves)
+    analytics = engine.get_complete_analytics()
+    assert hasattr(analytics, 'acf_method')
+    assert hasattr(analytics, 'wa_method')
+    assert hasattr(analytics, 'risk_metrics')
+    assert hasattr(analytics, 'portfolio_weights')
+    assert hasattr(analytics, 'bond_analytics')
+    assert hasattr(analytics, 'calculation_date')
+    # Portfolio value should be positive
+    assert analytics.risk_metrics.portfolio_value > 0
+
+def test_decompose_total_return():
+    holdings, parameters, yield_curves = sample_inputs()
+    engine = ETFAnalyticsEngine(holdings, parameters, yield_curves)
+    result = engine.decompose_total_return(30)
+    assert hasattr(result, 'carry_return')
+    assert hasattr(result, 'roll_return')
+    assert hasattr(result, 'price_return')
+    assert hasattr(result, 'total_return')
+    assert hasattr(result, 'time_horizon_days')
+    assert result.time_horizon_days == 30
+    # Total return should be sum of components
+    assert result.total_return == pytest.approx(result.carry_return + result.roll_return + result.price_return, rel=1e-6)
+
+def test_export_summary_dataframe():
+    holdings, parameters, yield_curves = sample_inputs()
+    engine = ETFAnalyticsEngine(holdings, parameters, yield_curves)
+    df = engine.export_summary_dataframe()
+    assert isinstance(df, pd.DataFrame)
+    assert 'Metric' in df.columns
+    assert 'ACF Method' in df.columns
+    assert 'WA Method' in df.columns
+    # Should have at least 5 metrics
+    assert len(df) >= 5
+
+def test_export_detailed_dataframe():
+    holdings, parameters, yield_curves = sample_inputs()
+    engine = ETFAnalyticsEngine(holdings, parameters, yield_curves)
+    df = engine.export_detailed_dataframe()
+    assert isinstance(df, pd.DataFrame)
+    assert 'Bond ID' in df.columns
+    assert 'Weight (%)' in df.columns
+    assert 'YTM (%)' in df.columns
+    assert 'Mod Duration' in df.columns
+    assert 'Convexity' in df.columns
+    assert '# CFs' in df.columns
+    # Should have a row for each bond
+    assert len(df) == 2
+
+def test_decompose_total_return_invalid():
+    holdings, parameters, yield_curves = sample_inputs()
+    engine = ETFAnalyticsEngine(holdings, parameters, yield_curves)
+    with pytest.raises(ValidationError):
+        engine.decompose_total_return(-5)
+    with pytest.raises(ValidationError):
+        engine.decompose_total_return(0)
+    with pytest.raises(ValidationError):
+        engine.decompose_total_return('abc') 
